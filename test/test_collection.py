@@ -739,6 +739,7 @@ class TestCollection(unittest.TestCase):
 
         # No error
         db.test.insert([{'i': 1}] * 2, safe=False)
+        raise SkipTest("tokumon multi doc insert #6250")
         self.assertEqual(1, db.test.count())
 
         self.assertRaises(
@@ -925,6 +926,7 @@ class TestCollection(unittest.TestCase):
 
         db.test.insert(docs, manipulate=False)
         self.assertEqual(11000, db.error()['code'])
+        raise SkipTest("tokumon multi doc insert #6250")
         self.assertEqual(3, db.test.count())
 
         db.test.insert(docs, manipulate=False, continue_on_error=True)
