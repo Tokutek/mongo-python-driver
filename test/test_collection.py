@@ -347,6 +347,7 @@ class TestCollection(unittest.TestCase):
         self.assertEqual([('loc', '2d')], index_info['key'])
 
     def test_index_haystack(self):
+        raise SkipTest("tokumon geoSearch")
         if is_mongos(self.db.connection):
             raise SkipTest("geoSearch is not supported by mongos")
         db = self.db
@@ -423,6 +424,7 @@ class TestCollection(unittest.TestCase):
         db.test.insert({'i': 3})
 
     def test_index_drop_dups(self):
+        raise SkipTest("tokumon disabled #6163")
         # Try dropping duplicates
         db = self.db
         self._drop_dups_setup(db)
@@ -527,6 +529,7 @@ class TestCollection(unittest.TestCase):
         self.assertFalse("_id" in l)
 
     def test_options(self):
+        raise SkipTest("tokumon capped collections #6033")
         db = self.db
         db.drop_collection("test")
         db.test.save({})
@@ -1089,6 +1092,7 @@ class TestCollection(unittest.TestCase):
                           {"hello": "world"}, safe=True)
 
     def test_safe_remove(self):
+        raise SkipTest("tokumon needs capped collections #6033")
         db = self.db
         db.drop_collection("test")
         db.create_collection("test", capped=True, size=1000)
@@ -1321,6 +1325,7 @@ class TestCollection(unittest.TestCase):
         self.assertEqual(9, sum)
 
     def test_rename(self):
+        raise SkipTest("tokumon rename #6076")
         db = self.db
         db.drop_collection("test")
         db.drop_collection("foo")
@@ -1538,6 +1543,7 @@ class TestCollection(unittest.TestCase):
                             safe=True)
 
     def test_map_reduce(self):
+        raise SkipTest("tokumon crash");
         if not version.at_least(self.db.connection, (1, 1, 1)):
             raise SkipTest("mapReduce command requires MongoDB >= 1.1.1")
 
@@ -1840,6 +1846,7 @@ class TestCollection(unittest.TestCase):
         c.remove({})
 
     def test_uuid_subtype(self):
+        raise SkipTest("tokumon crash")
         if not have_uuid:
             raise SkipTest("No uuid module")
 

@@ -194,6 +194,7 @@ class TestDatabase(unittest.TestCase):
         self.assertEqual(100, db.command("profile", -1)['slowms'])
 
     def test_profiling_info(self):
+        raise SkipTest("tokumon profiling #6119")
         if is_mongos(self.connection):
             raise SkipTest('profile is not supported by mongos')
         db = self.connection.pymongo_test

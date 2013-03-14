@@ -71,8 +71,10 @@ class TestCursor(unittest.TestCase):
 
         spec = [("num", ASCENDING)]
         self.assertEqual(db.test.find({}).explain()["cursor"], "BasicCursor")
-        self.assertEqual(db.test.find({}).hint(spec).explain()["cursor"],
-                         "BtreeCursor %s" % index)
+        name = db.test.find({}).hint(spec).explain()["cursor"]
+        if name != "IndexCursor %s" % index and name != "BtreeCursor %s" % index:
+            self.assertEqual(db.test.find({}).hint(spec).explain()["cursor"],
+                             "BtreeCursor %s" % index)
         self.assertEqual(db.test.find({}).hint(spec).hint(None)
                          .explain()["cursor"],
                          "BasicCursor")

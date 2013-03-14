@@ -41,6 +41,7 @@ pair = '%s:%d' % (host, port)
 class TestCommon(unittest.TestCase):
 
     def test_baseobject(self):
+        raise SkipTest("tokumon replication #6018")
 
         # In Python 2.6+ we could use the catch_warnings context
         # manager to test this warning nicely. As we can't do that
