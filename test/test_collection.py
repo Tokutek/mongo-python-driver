@@ -529,7 +529,7 @@ class TestCollection(unittest.TestCase):
         self.assertFalse("_id" in l)
 
     def test_options(self):
-        raise SkipTest("tokumon capped collections #6033")
+        #raise SkipTest("tokumon capped collections #6033")
         db = self.db
         db.drop_collection("test")
         db.test.save({})
@@ -1094,7 +1094,7 @@ class TestCollection(unittest.TestCase):
                           {"hello": "world"}, safe=True)
 
     def test_safe_remove(self):
-        raise SkipTest("tokumon needs capped collections #6033")
+        #raise SkipTest("tokumon needs capped collections #6033")
         db = self.db
         db.drop_collection("test")
         db.create_collection("test", capped=True, size=1000)
@@ -1327,7 +1327,7 @@ class TestCollection(unittest.TestCase):
         self.assertEqual(9, sum)
 
     def test_rename(self):
-        raise SkipTest("tokumon rename #6076")
+        #raise SkipTest("tokumon rename #6076")
         db = self.db
         db.drop_collection("test")
         db.drop_collection("foo")
