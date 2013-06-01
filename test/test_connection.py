@@ -172,6 +172,10 @@ class TestConnection(unittest.TestCase, TestRequestMixin):
 
     def test_copy_db(self):
         c = Connection(self.host, self.port)
+        response = c.admin.command('ismaster')
+        if 'setName' in response:
+            raise SkipTest("Connected to a replica set, skipping test_copy_db until the big txn work is done.")
+
         self.assertTrue(c.in_request())
 
         self.assertRaises(TypeError, c.copy_database, 4, "foo")
