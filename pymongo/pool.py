@@ -20,24 +20,26 @@ import threading
 import weakref
 
 from pymongo import thread_util
-from pymongo.errors import ConnectionFailure, ConfigurationError
+from pymongo.common import HAS_SSL
+from pymongo.errors import (CertificateError, ConnectionFailure,
+                            ConfigurationError)
 
-
-have_ssl = True
 try:
-    import ssl
+    from ssl import match_hostname
 except ImportError:
-    have_ssl = False
+    from pymongo.ssl_match_hostname import match_hostname
 
-
-NO_REQUEST    = None
-NO_SOCKET_YET = -1
-
+if HAS_SSL:
+    import ssl
 
 if sys.platform.startswith('java'):
     from select import cpython_compatible_select as select
 else:
     from select import select
+
+
+NO_REQUEST = None
+NO_SOCKET_YET = -1
 
 
 def _closed(sock):
@@ -54,8 +56,9 @@ def _closed(sock):
 class SocketInfo(object):
     """Store a socket with some metadata
     """
-    def __init__(self, sock, pool_id):
+    def __init__(self, sock, pool_id, host=None):
         self.sock = sock
+        self.host = host
         self.authset = set()
         self.closed = False
         self.last_checkout = time.time()
@@ -95,7 +98,8 @@ class SocketInfo(object):
 # http://bugs.jython.org/issue1057
 class Pool:
     def __init__(self, pair, max_size, net_timeout, conn_timeout, use_ssl,
-                 use_greenlets):
+                 use_greenlets, ssl_keyfile=None, ssl_certfile=None,
+                 ssl_cert_reqs=None, ssl_ca_certs=None):
         """
         :Parameters:
           - `pair`: a (hostname, port) tuple
@@ -106,6 +110,23 @@ class Pool:
           - `use_greenlets`: bool, if True then start_request() assigns a
               socket to the current greenlet - otherwise it is assigned to the
               current thread
+          - `ssl_keyfile`: The private keyfile used to identify the local
+            connection against mongod.  If included with the ``certfile` then
+            only the ``ssl_certfile`` is needed.  Implies ``ssl=True``.
+          - `ssl_certfile`: The certificate file used to identify the local
+            connection against mongod. Implies ``ssl=True``.
+          - `ssl_cert_reqs`: Specifies whether a certificate is required from
+            the other side of the connection, and whether it will be validated
+            if provided. It must be one of the three values ``ssl.CERT_NONE``
+            (certificates ignored), ``ssl.CERT_OPTIONAL``
+            (not required, but validated if provided), or ``ssl.CERT_REQUIRED``
+            (required and validated). If the value of this parameter is not
+            ``ssl.CERT_NONE``, then the ``ssl_ca_certs`` parameter must point
+            to a file of CA certificates. Implies ``ssl=True``.
+          - `ssl_ca_certs`: The ca_certs file contains a set of concatenated
+            "certification authority" certificates, which are used to validate
+            certificates passed from the other end of the connection.
+            Implies ``ssl=True``.
         """
         if use_greenlets and not thread_util.have_greenlet:
             raise ConfigurationError(
@@ -125,6 +146,14 @@ class Pool:
         self.net_timeout = net_timeout
         self.conn_timeout = conn_timeout
         self.use_ssl = use_ssl
+        self.ssl_keyfile = ssl_keyfile
+        self.ssl_certfile = ssl_certfile
+        self.ssl_cert_reqs = ssl_cert_reqs
+        self.ssl_ca_certs = ssl_ca_certs
+
+        if HAS_SSL and use_ssl and not ssl_cert_reqs:
+            self.ssl_cert_reqs = ssl.CERT_NONE
+
         self._ident = thread_util.create_ident(use_greenlets)
 
         # Map self._ident.get() -> request socket
@@ -149,7 +178,8 @@ class Pool:
         finally:
             self.lock.release()
 
-        for sock_info in sockets: sock_info.close()
+        for sock_info in sockets:
+            sock_info.close()
 
     def create_connection(self, pair):
         """Connect to *pair* and return the socket object.
@@ -199,7 +229,7 @@ class Pool:
             raise err
         else:
             # This likely means we tried to connect to an IPv6 only
-            # host with an OS/kernel or Python interpeter that doesn't
+            # host with an OS/kernel or Python interpreter that doesn't
             # support IPv6. The test case is Jython2.5.1 which doesn't
             # support IPv6 at all.
             raise socket.error('getaddrinfo failed')
@@ -210,17 +240,25 @@ class Pool:
            return_socket() when you're done with it.
         """
         sock = self.create_connection(pair)
+        hostname = (pair or self.pair)[0]
 
         if self.use_ssl:
             try:
-                sock = ssl.wrap_socket(sock)
+                sock = ssl.wrap_socket(sock,
+                                       certfile=self.ssl_certfile,
+                                       keyfile=self.ssl_keyfile,
+                                       ca_certs=self.ssl_ca_certs,
+                                       cert_reqs=self.ssl_cert_reqs)
+                if self.ssl_cert_reqs:
+                    match_hostname(sock.getpeercert(), hostname)
+
             except ssl.SSLError:
                 sock.close()
                 raise ConnectionFailure("SSL handshake failed. MongoDB may "
                                         "not be configured with SSL support.")
 
         sock.settimeout(self.net_timeout)
-        return SocketInfo(sock, self.pool_id)
+        return SocketInfo(sock, self.pool_id, hostname)
 
     def get_socket(self, pair=None):
         """Get a socket from the pool.
@@ -233,7 +271,7 @@ class Pool:
           - `pair`: optional (hostname, port) tuple
         """
         # We use the pid here to avoid issues with fork / multiprocessing.
-        # See test.test_connection:TestConnection.test_fork for an example of
+        # See test.test_client:TestClient.test_fork for an example of
         # what could go wrong otherwise
         if self.pid != os.getpid():
             self.reset()
@@ -286,8 +324,6 @@ class Pool:
         return bool(self._request_counter.get())
 
     def end_request(self):
-        tid = self._ident.get()
-
         # Check if start_request has ever been called in this thread / greenlet
         count = self._request_counter.get()
         if count:
@@ -424,8 +460,8 @@ class Pool:
 
 class Request(object):
     """
-    A context manager returned by Connection.start_request(), so you can do
-    `with connection.start_request(): do_something()` in Python 2.5+.
+    A context manager returned by :meth:`start_request`, so you can do
+    `with client.start_request(): do_something()` in Python 2.5+.
     """
     def __init__(self, connection):
         self.connection = connection

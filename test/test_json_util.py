@@ -35,7 +35,7 @@ from bson.objectid import ObjectId
 from bson.timestamp import Timestamp
 from bson.tz_util import utc
 
-from test.test_connection import get_connection
+from test.test_client import get_client
 
 PY3 = sys.version_info[0] == 3
 
@@ -46,7 +46,7 @@ class TestJsonUtil(unittest.TestCase):
         if not json_util.json_lib:
             raise SkipTest("No json or simplejson module")
 
-        self.db = get_connection().pymongo_test
+        self.db = get_client().pymongo_test
 
     def round_tripped(self, doc):
         return json_util.loads(json_util.dumps(doc))
@@ -79,6 +79,18 @@ class TestJsonUtil(unittest.TestCase):
             self.assertEqual(re.IGNORECASE | re.UNICODE, res.flags)
         else:
             self.assertEqual(re.IGNORECASE, res.flags)
+
+        all_options = re.I|re.L|re.M|re.S|re.U|re.X
+        regex = re.compile("a*b", all_options)
+        res = self.round_tripped({"r": regex})["r"]
+        self.assertEqual(all_options, res.flags)
+
+        # Some tools may not add $options if no flags are set.
+        res = json_util.loads('{"r": {"$regex": "a*b"}}')['r']
+        expected_flags = 0
+        if PY3:
+            expected_flags = re.U
+        self.assertEqual(expected_flags, res.flags)
 
     def test_minkey(self):
         self.round_trip({"m": MinKey()})

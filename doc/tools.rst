@@ -88,7 +88,7 @@ various Python frameworks and libraries.
   project to enable using MongoDB as a backend for `beaker's
   <http://beaker.groovie.org/>`_ caching / session system.
   `The source is on github <http://github.com/bwmcadams/mongodb_beaker>`_.
-* `MongoLog <http://github.com/andreisavu/mongodb-log/>`_ is a Python logging
+* `MongoLog <http://github.com/puentesarrin/mongodb-log/>`_ is a Python logging
   handler that stores logs in MongoDB using a capped collection.
 * `c5t <http://bitbucket.org/percious/c5t/>`_ is a content-management system
   using TurboGears and MongoDB.
@@ -100,13 +100,19 @@ various Python frameworks and libraries.
   :mod:`repoze.what`.
 * `mongobox <http://github.com/theorm/mongobox>`_ is a tool to run a sandboxed
   MongoDB instance from within a python app.
+* `Flask-MongoAlchemy <http://github.com/cobrateam/flask-mongoalchemy/>`_ Add
+  Flask support for MongoDB using MongoAlchemy.
+* `Flask-MongoKit <http://github.com/jarus/flask-mongokit/>`_ Flask extension
+  to better integrate MongoKit into Flask.
+* `Flask-PyMongo <http://github.com/dcrosta/flask-pymongo/>`_ Flask-PyMongo
+  bridges Flask and PyMongo.
 
 Alternative Drivers
 -------------------
 These are alternatives to PyMongo.
 
-* `asyncmongo <https://github.com/bitly/asyncmongo>`_ is an asynchronous library
-  for accessing mongo which is built on the tornado ioloop.
+* `Motor <https://github.com/mongodb/motor>`_ is a full-featured, non-blocking
+  MongoDB driver for Python Tornado applications.
 * `TxMongo <http://github.com/fiorix/mongo-async-python-driver>`_ is an
   asynchronous Python driver for MongoDB, although it is not currently
   recommended for production use.

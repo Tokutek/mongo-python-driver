@@ -146,7 +146,7 @@ class Cursor(object):
             self.__die()
 
     def rewind(self):
-        """Rewind this cursor to it's unevaluated state.
+        """Rewind this cursor to its unevaluated state.
 
         Reset this cursor if it has been partially or completely evaluated.
         Any options that are present on the cursor will remain in effect.
@@ -522,7 +522,7 @@ class Cursor(object):
         `with_limit_and_skip` to ``True`` if that is the desired behavior.
         Raises :class:`~pymongo.errors.OperationFailure` on a database error.
 
-        With :class:`~pymongo.replica_set_connection.ReplicaSetConnection`
+        With :class:`~pymongo.mongo_replica_set_client.MongoReplicaSetClient`
         or :class:`~pymongo.master_slave_connection.MasterSlaveConnection`,
         if `read_preference` is not
         :attr:`pymongo.read_preferences.ReadPreference.PRIMARY` or
@@ -575,7 +575,7 @@ class Cursor(object):
         Raises :class:`TypeError` if `key` is not an instance of
         :class:`basestring` (:class:`str` in python 3).
 
-        With :class:`~pymongo.replica_set_connection.ReplicaSetConnection`
+        With :class:`~pymongo.mongo_replica_set_client.MongoReplicaSetClient`
         or :class:`~pymongo.master_slave_connection.MasterSlaveConnection`,
         if `read_preference` is
         not :attr:`pymongo.read_preferences.ReadPreference.PRIMARY` or
@@ -798,7 +798,7 @@ class Cursor(object):
 
         Useful if you need to manage cursor ids and want to handle killing
         cursors manually using
-        :meth:`~pymongo.connection.Connection.kill_cursors`
+        :meth:`~pymongo.mongo_client.MongoClient.kill_cursors`
 
         .. versionadded:: 2.2
         """
@@ -841,22 +841,33 @@ class Cursor(object):
         return self.__clone(deepcopy=True)
 
     def __deepcopy(self, x, memo=None):
-        """Deepcopy helper for the data dictionary.
+        """Deepcopy helper for the data dictionary or list.
 
         Regular expressions cannot be deep copied but as they are immutable we
         don't have to copy them when cloning.
         """
-        y = {}
+        if not hasattr(x, 'items'):
+            y, is_list, iterator = [], True, enumerate(x)
+        else:
+            y, is_list, iterator = {}, False, x.iteritems()
+
         if memo is None:
             memo = {}
         val_id = id(x)
         if val_id in memo:
             return memo.get(val_id)
         memo[val_id] = y
-        for key, value in x.iteritems():
-            if isinstance(value, dict) and not isinstance(value, SON):
+
+        for key, value in iterator:
+            if isinstance(value, (dict, list)) and not isinstance(value, SON):
                 value = self.__deepcopy(value, memo)
             elif not isinstance(value, RE_TYPE):
                 value = copy.deepcopy(value, memo)
-            y[copy.deepcopy(key, memo)] = value
+
+            if is_list:
+                y.append(value)
+            else:
+                if not isinstance(key, RE_TYPE):
+                    key = copy.deepcopy(key, memo)
+                y[key] = value
         return y

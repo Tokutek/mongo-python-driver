@@ -19,6 +19,7 @@
 # a replica set. Thus each method asserts everything we want to assert for a
 # given replica-set configuration.
 
+import itertools
 import time
 import unittest
 
@@ -26,15 +27,18 @@ import ha_tools
 from ha_tools import use_greenlets
 
 
-from pymongo import (ReplicaSetConnection,
-                     ReadPreference)
-from pymongo.mongo_replica_set_client import Member, Monitor
-from pymongo.mongo_client import _partition_node
-from pymongo.connection import Connection
 from pymongo.errors import AutoReconnect, OperationFailure, ConnectionFailure
+from pymongo.mongo_replica_set_client import Member, Monitor
+from pymongo.mongo_replica_set_client import MongoReplicaSetClient
+from pymongo.mongo_client import MongoClient, _partition_node
+from pymongo.read_preferences import ReadPreference, modes
 
 from test import utils
 from test.utils import one
+
+
+# Will be imported from time or gevent, below
+sleep = None
 
 
 # Override default 30-second interval for faster testing
@@ -49,7 +53,22 @@ SECONDARY_PREFERRED = ReadPreference.SECONDARY_PREFERRED
 NEAREST = ReadPreference.NEAREST
 
 
-class TestDirectConnection(unittest.TestCase):
+def partition_nodes(nodes):
+    """Translate from ['host:port', ...] to [(host, port), ...]"""
+    return [_partition_node(node) for node in nodes]
+
+
+class HATestCase(unittest.TestCase):
+    """A test case for connections to replica sets or mongos."""
+
+    def tearDown(self):
+        ha_tools.kill_all_members()
+        ha_tools.nodes.clear()
+        ha_tools.routers.clear()
+        sleep(1)  # Let members really die.
+
+
+class TestDirectConnection(HATestCase):
 
     def setUp(self):
         members = [{}, {}, {'arbiterOnly': True}]
@@ -57,14 +76,14 @@ class TestDirectConnection(unittest.TestCase):
         self.seed, self.name = res
 
     def test_secondary_connection(self):
-        self.c = ReplicaSetConnection(
+        self.c = MongoReplicaSetClient(
             self.seed, replicaSet=self.name, use_greenlets=use_greenlets)
         self.assertTrue(bool(len(self.c.secondaries)))
         db = self.c.pymongo_test
-        db.test.remove({}, safe=True, w=len(self.c.secondaries))
 
         # Wait for replication...
         w = len(self.c.secondaries) + 1
+        db.test.remove({}, w=w)
         db.test.insert({'foo': 'bar'}, w=w)
 
         # Test direct connection to a primary or secondary
@@ -76,7 +95,7 @@ class TestDirectConnection(unittest.TestCase):
         arbiter_host, arbiter_port = ha_tools.get_arbiters()[0].split(':')
         arbiter_port = int(arbiter_port)
 
-        # A Connection succeeds no matter the read preference
+        # MongoClient succeeds no matter the read preference
         for kwargs in [
             {'read_preference': PRIMARY},
             {'read_preference': PRIMARY_PREFERRED},
@@ -85,67 +104,67 @@ class TestDirectConnection(unittest.TestCase):
             {'read_preference': NEAREST},
             {'slave_okay': True}
         ]:
-            conn = Connection(primary_host,
-                              primary_port,
-                              use_greenlets=use_greenlets,
-                              **kwargs)
-            self.assertEqual(primary_host, conn.host)
-            self.assertEqual(primary_port, conn.port)
-            self.assertTrue(conn.is_primary)
+            client = MongoClient(primary_host,
+                                 primary_port,
+                                 use_greenlets=use_greenlets,
+                                 **kwargs)
+            self.assertEqual(primary_host, client.host)
+            self.assertEqual(primary_port, client.port)
+            self.assertTrue(client.is_primary)
 
             # Direct connection to primary can be queried with any read pref
-            self.assertTrue(conn.pymongo_test.test.find_one())
+            self.assertTrue(client.pymongo_test.test.find_one())
 
-            conn = Connection(secondary_host,
-                              secondary_port,
-                              use_greenlets=use_greenlets,
-                              **kwargs)
-            self.assertEqual(secondary_host, conn.host)
-            self.assertEqual(secondary_port, conn.port)
-            self.assertFalse(conn.is_primary)
+            client = MongoClient(secondary_host,
+                                 secondary_port,
+                                 use_greenlets=use_greenlets,
+                                 **kwargs)
+            self.assertEqual(secondary_host, client.host)
+            self.assertEqual(secondary_port, client.port)
+            self.assertFalse(client.is_primary)
 
             # Direct connection to secondary can be queried with any read pref
             # but PRIMARY
             if kwargs.get('read_preference') != PRIMARY:
-                self.assertTrue(conn.pymongo_test.test.find_one())
+                self.assertTrue(client.pymongo_test.test.find_one())
             else:
                 self.assertRaises(
-                    AutoReconnect, conn.pymongo_test.test.find_one)
+                    AutoReconnect, client.pymongo_test.test.find_one)
 
             # Since an attempt at an acknowledged write to a secondary from a
-            # direct connection raises AutoReconnect('not master'), Connection
+            # direct connection raises AutoReconnect('not master'), MongoClient
             # should do the same for unacknowledged writes.
             try:
-                conn.pymongo_test.test.insert({}, safe=False)
+                client.pymongo_test.test.insert({}, w=0)
             except AutoReconnect, e:
                 self.assertEqual('not master', e.args[0])
             else:
                 self.fail(
-                    'Unacknowledged insert into secondary connection %s should'
-                    'have raised exception' % conn)
+                    'Unacknowledged insert into secondary client %s should'
+                    'have raised exception' % (client,))
 
             # Test direct connection to an arbiter
-            conn = Connection(arbiter_host, arbiter_port, **kwargs)
-            self.assertEqual(arbiter_host, conn.host)
-            self.assertEqual(arbiter_port, conn.port)
-            self.assertFalse(conn.is_primary)
+            client = MongoClient(arbiter_host, arbiter_port, **kwargs)
+            self.assertEqual(arbiter_host, client.host)
+            self.assertEqual(arbiter_port, client.port)
+            self.assertFalse(client.is_primary)
             
             # See explanation above
             try:
-                conn.pymongo_test.test.insert({}, safe=False)
+                client.pymongo_test.test.insert({}, w=0)
             except AutoReconnect, e:
                 self.assertEqual('not master', e.args[0])
             else:
                 self.fail(
-                    'Unacknowledged insert into arbiter connection %s should'
-                    'have raised exception' % conn)
+                    'Unacknowledged insert into arbiter client %s should'
+                    'have raised exception' % (client,))
         
     def tearDown(self):
         self.c.close()
-        ha_tools.kill_all_members()
+        super(TestDirectConnection, self).tearDown()
 
 
-class TestPassiveAndHidden(unittest.TestCase):
+class TestPassiveAndHidden(HATestCase):
 
     def setUp(self):
         members = [{},
@@ -158,11 +177,11 @@ class TestPassiveAndHidden(unittest.TestCase):
         self.seed, self.name = res
 
     def test_passive_and_hidden(self):
-        self.c = ReplicaSetConnection(
+        self.c = MongoReplicaSetClient(
             self.seed, replicaSet=self.name, use_greenlets=use_greenlets)
 
         passives = ha_tools.get_passives()
-        passives = [_partition_node(member) for member in passives]
+        passives = partition_nodes(passives)
         self.assertEqual(self.c.secondaries, set(passives))
 
         for mode in SECONDARY, SECONDARY_PREFERRED:
@@ -174,10 +193,10 @@ class TestPassiveAndHidden(unittest.TestCase):
 
     def tearDown(self):
         self.c.close()
-        ha_tools.kill_all_members()
+        super(TestPassiveAndHidden, self).tearDown()
 
 
-class TestMonitorRemovesRecoveringMember(unittest.TestCase):
+class TestMonitorRemovesRecoveringMember(HATestCase):
     # Members in STARTUP2 or RECOVERING states are shown in the primary's
     # isMaster response, but aren't secondaries and shouldn't be read from.
     # Verify that if a secondary goes into RECOVERING mode, the Monitor removes
@@ -189,14 +208,13 @@ class TestMonitorRemovesRecoveringMember(unittest.TestCase):
         self.seed, self.name = res
 
     def test_monitor_removes_recovering_member(self):
-        self.c = ReplicaSetConnection(
-            self.seed, replicaSet=self.name, use_greenlets=use_greenlets,
-            auto_start_request=False)
+        self.c = MongoReplicaSetClient(
+            self.seed, replicaSet=self.name, use_greenlets=use_greenlets)
 
         secondaries = ha_tools.get_secondaries()
 
         for mode in SECONDARY, SECONDARY_PREFERRED:
-            partitioned_secondaries = [_partition_node(s) for s in secondaries]
+            partitioned_secondaries = partition_nodes(secondaries)
             utils.assertReadFromAll(self, self.c, partitioned_secondaries, mode)
 
         secondary, recovering_secondary = secondaries
@@ -209,10 +227,10 @@ class TestMonitorRemovesRecoveringMember(unittest.TestCase):
 
     def tearDown(self):
         self.c.close()
-        ha_tools.kill_all_members()
+        super(TestMonitorRemovesRecoveringMember, self).tearDown()
 
 
-class TestTriggeredRefresh(unittest.TestCase):
+class TestTriggeredRefresh(HATestCase):
     # Verify that if a secondary goes into RECOVERING mode or if the primary
     # changes, the next exception triggers an immediate refresh.
 
@@ -226,11 +244,11 @@ class TestTriggeredRefresh(unittest.TestCase):
 
     def test_recovering_member_triggers_refresh(self):
         # To test that find_one() and count() trigger immediate refreshes,
-        # we'll create a separate connection for each
+        # we'll create a separate client for each
         self.c_find_one, self.c_count = [
-            ReplicaSetConnection(
+            MongoReplicaSetClient(
                 self.seed, replicaSet=self.name, use_greenlets=use_greenlets,
-                auto_start_request=False, read_preference=SECONDARY)
+                read_preference=SECONDARY)
             for _ in xrange(2)]
 
         # We've started the primary and one secondary
@@ -256,9 +274,8 @@ class TestTriggeredRefresh(unittest.TestCase):
             self.assertEqual(_partition_node(primary), c.primary)
 
     def test_stepdown_triggers_refresh(self):
-        c_find_one = ReplicaSetConnection(
-            self.seed, replicaSet=self.name, use_greenlets=use_greenlets,
-            auto_start_request=False)
+        c_find_one = MongoReplicaSetClient(
+            self.seed, replicaSet=self.name, use_greenlets=use_greenlets)
 
         # We've started the primary and one secondary
         primary = ha_tools.get_primary()
@@ -281,21 +298,21 @@ class TestTriggeredRefresh(unittest.TestCase):
         # We've detected the stepdown
         self.assertTrue(
             not c_find_one.primary
-            or primary != _partition_node(c_find_one.primary))
+            or _partition_node(primary) != c_find_one.primary)
 
     def tearDown(self):
         Monitor._refresh_interval = MONITOR_INTERVAL
-        ha_tools.kill_all_members()
+        super(TestTriggeredRefresh, self).tearDown()
 
 
-class TestHealthMonitor(unittest.TestCase):
+class TestHealthMonitor(HATestCase):
 
     def setUp(self):
         res = ha_tools.start_replica_set([{}, {}, {}])
         self.seed, self.name = res
 
     def test_primary_failure(self):
-        c = ReplicaSetConnection(
+        c = MongoReplicaSetClient(
             self.seed, replicaSet=self.name, use_greenlets=use_greenlets)
         self.assertTrue(bool(len(c.secondaries)))
         primary = c.primary
@@ -315,7 +332,7 @@ class TestHealthMonitor(unittest.TestCase):
         self.assertNotEqual(secondaries, c.secondaries)
 
     def test_secondary_failure(self):
-        c = ReplicaSetConnection(
+        c = MongoReplicaSetClient(
             self.seed, replicaSet=self.name, use_greenlets=use_greenlets)
         self.assertTrue(bool(len(c.secondaries)))
         primary = c.primary
@@ -341,51 +358,50 @@ class TestHealthMonitor(unittest.TestCase):
         self.assertTrue(readers_changed())
 
     def test_primary_stepdown(self):
-        c = ReplicaSetConnection(
+        c = MongoReplicaSetClient(
             self.seed, replicaSet=self.name, use_greenlets=use_greenlets)
         self.assertTrue(bool(len(c.secondaries)))
         primary = c.primary
-        secondaries = c.secondaries.copy()
-
-        def primary_changed():
-            for _ in xrange(30):
-                if c.primary != primary:
-                    return True
-                sleep(1)
-            return False
-
         ha_tools.stepdown_primary()
-        self.assertTrue(primary_changed())
 
-        # There can be a delay between finding the primary and updating
-        # secondaries
-        sleep(5)
-        self.assertNotEqual(secondaries, c.secondaries)
+        # Wait for new primary
+        patience_seconds = 30
+        for _ in xrange(patience_seconds):
+            sleep(1)
+            rs_state = c._MongoReplicaSetClient__rs_state
+            if rs_state.writer and rs_state.writer != primary:
+                # New primary stepped up
+                new_primary = _partition_node(ha_tools.get_primary())
+                self.assertEqual(new_primary, rs_state.writer)
+                new_secondaries = partition_nodes(ha_tools.get_secondaries())
+                self.assertEqual(set(new_secondaries), rs_state.secondaries)
+                break
+        else:
+            self.fail(
+                "No new primary after %s seconds. Old primary was %s, current"
+                " is %s" % (patience_seconds, primary, ha_tools.get_primary()))
 
-    def tearDown(self):
-        ha_tools.kill_all_members()
 
-
-class TestWritesWithFailover(unittest.TestCase):
+class TestWritesWithFailover(HATestCase):
 
     def setUp(self):
         res = ha_tools.start_replica_set([{}, {}, {}])
         self.seed, self.name = res
 
     def test_writes_with_failover(self):
-        c = ReplicaSetConnection(
+        c = MongoReplicaSetClient(
             self.seed, replicaSet=self.name, use_greenlets=use_greenlets)
         primary = c.primary
         db = c.pymongo_test
         w = len(c.secondaries) + 1
-        db.test.remove({}, safe=True, w=w)
-        db.test.insert({'foo': 'bar'}, safe=True, w=w)
+        db.test.remove({}, w=w)
+        db.test.insert({'foo': 'bar'}, w=w)
         self.assertEqual('bar', db.test.find_one()['foo'])
 
         def try_write():
             for _ in xrange(30):
                 try:
-                    db.test.insert({'bar': 'baz'}, safe=True)
+                    db.test.insert({'bar': 'baz'})
                     return True
                 except AutoReconnect:
                     sleep(1)
@@ -397,20 +413,16 @@ class TestWritesWithFailover(unittest.TestCase):
         self.assertTrue(primary != c.primary)
         self.assertEqual('baz', db.test.find_one({'bar': 'baz'})['bar'])
 
-    def tearDown(self):
-        ha_tools.kill_all_members()
 
-
-class TestReadWithFailover(unittest.TestCase):
+class TestReadWithFailover(HATestCase):
 
     def setUp(self):
         res = ha_tools.start_replica_set([{}, {}, {}])
         self.seed, self.name = res
 
     def test_read_with_failover(self):
-        c = ReplicaSetConnection(
-            self.seed, replicaSet=self.name, use_greenlets=use_greenlets,
-            auto_start_request=False)
+        c = MongoReplicaSetClient(
+            self.seed, replicaSet=self.name, use_greenlets=use_greenlets)
         self.assertTrue(bool(len(c.secondaries)))
 
         def iter_cursor(cursor):
@@ -420,9 +432,9 @@ class TestReadWithFailover(unittest.TestCase):
 
         db = c.pymongo_test
         w = len(c.secondaries) + 1
-        db.test.remove({}, safe=True, w=w)
+        db.test.remove({}, w=w)
         # Force replication
-        db.test.insert([{'foo': i} for i in xrange(10)], safe=True, w=w)
+        db.test.insert([{'foo': i} for i in xrange(10)], w=w)
         self.assertEqual(10, db.test.count())
 
         db.read_preference = SECONDARY_PREFERRED
@@ -435,11 +447,8 @@ class TestReadWithFailover(unittest.TestCase):
         self.assertTrue(iter_cursor(cursor))
         self.assertEqual(10, cursor._Cursor__retrieved)
 
-    def tearDown(self):
-        ha_tools.kill_all_members()
 
-
-class TestReadPreference(unittest.TestCase):
+class TestReadPreference(HATestCase):
     def setUp(self):
         members = [
             # primary
@@ -481,13 +490,13 @@ class TestReadPreference(unittest.TestCase):
         self.other_secondary_tags = ha_tools.get_tags(other_secondary)
         self.other_secondary_dc = {'dc': self.other_secondary_tags['dc']}
 
-        self.c = ReplicaSetConnection(
+        self.c = MongoReplicaSetClient(
             self.seed, replicaSet=self.name, use_greenlets=use_greenlets)
         self.db = self.c.pymongo_test
         self.w = len(self.c.secondaries) + 1
-        self.db.test.remove({}, safe=True, w=self.w)
+        self.db.test.remove({}, w=self.w)
         self.db.test.insert(
-            [{'foo': i} for i in xrange(10)], safe=True, w=self.w)
+            [{'foo': i} for i in xrange(10)], w=self.w)
 
         self.clear_ping_times()
 
@@ -507,9 +516,8 @@ class TestReadPreference(unittest.TestCase):
         #
         # For each state, we verify the behavior of PRIMARY,
         # PRIMARY_PREFERRED, SECONDARY, SECONDARY_PREFERRED, and NEAREST
-        c = ReplicaSetConnection(
-            self.seed, replicaSet=self.name, use_greenlets=use_greenlets,
-            auto_start_request=False)
+        c = MongoReplicaSetClient(
+            self.seed, replicaSet=self.name, use_greenlets=use_greenlets)
 
         def assertReadFrom(member, *args, **kwargs):
             utils.assertReadFrom(self, c, member, *args, **kwargs)
@@ -656,9 +664,9 @@ class TestReadPreference(unittest.TestCase):
             self.fail("Primary didn't come back up")
 
         ha_tools.kill_members([unpartition_node(secondary)], 2)
-        self.assertTrue(Connection(
+        self.assertTrue(MongoClient(
             unpartition_node(primary), use_greenlets=use_greenlets,
-            slave_okay=True
+            read_preference=PRIMARY_PREFERRED
         ).admin.command('ismaster')['ismaster'])
 
         sleep(2 * MONITOR_INTERVAL)
@@ -691,9 +699,9 @@ class TestReadPreference(unittest.TestCase):
 
         # 4. PRIMARY UP, ALL SECONDARIES DOWN ---------------------------------
         ha_tools.kill_members([unpartition_node(other_secondary)], 2)
-        self.assertTrue(Connection(
+        self.assertTrue(MongoClient(
             unpartition_node(primary), use_greenlets=use_greenlets,
-            slave_okay=True
+            read_preference=PRIMARY_PREFERRED
         ).admin.command('ismaster')['ismaster'])
 
         #       PRIMARY
@@ -726,13 +734,69 @@ class TestReadPreference(unittest.TestCase):
 
         self.clear_ping_times()
 
+    def test_pinning(self):
+        # To make the code terser, copy modes into local scope
+        PRIMARY = ReadPreference.PRIMARY
+        PRIMARY_PREFERRED = ReadPreference.PRIMARY_PREFERRED
+        SECONDARY = ReadPreference.SECONDARY
+        SECONDARY_PREFERRED = ReadPreference.SECONDARY_PREFERRED
+        NEAREST = ReadPreference.NEAREST
+
+        c = MongoReplicaSetClient(
+            self.seed, replicaSet=self.name, use_greenlets=use_greenlets,
+            auto_start_request=True)
+
+        # Verify that changing the mode unpins the member. We'll try it for
+        # every relevant change of mode.
+        for mode0, mode1 in itertools.permutations(
+            (PRIMARY, SECONDARY, SECONDARY_PREFERRED, NEAREST), 2
+        ):
+            # Try reading and then changing modes and reading again, see if we
+            # read from a different host
+            for _ in range(1000):
+                # pin to this host
+                host = utils.read_from_which_host(c, mode0)
+                # unpin?
+                new_host = utils.read_from_which_host(c, mode1)
+                if host != new_host:
+                    # Reading with a different mode unpinned, hooray!
+                    break
+            else:
+                self.fail(
+                    "Changing from mode %s to mode %s never unpinned" % (
+                        modes[mode0], modes[mode1]))
+
+        # Now verify changing the tag_sets unpins the member.
+        tags0 = [{'a': 'a'}, {}]
+        tags1 = [{'a': 'x'}, {}]
+        for _ in range(1000):
+            host = utils.read_from_which_host(c, NEAREST, tags0)
+            new_host = utils.read_from_which_host(c, NEAREST, tags1)
+            if host != new_host:
+                break
+        else:
+            self.fail(
+                "Changing from tags %s to tags %s never unpinned" % (
+                    tags0, tags1))
+
+        # Finally, verify changing the secondary_acceptable_latency_ms unpins
+        # the member.
+        for _ in range(1000):
+            host = utils.read_from_which_host(c, SECONDARY, None, 15)
+            new_host = utils.read_from_which_host(c, SECONDARY, None, 20)
+            if host != new_host:
+                break
+        else:
+            self.fail(
+                "Changing secondary_acceptable_latency_ms from 15 to 20"
+                " never unpinned")
+
     def tearDown(self):
         self.c.close()
-        ha_tools.kill_all_members()
-        self.clear_ping_times()
+        super(TestReadPreference, self).tearDown()
 
 
-class TestReplicaSetAuth(unittest.TestCase):
+class TestReplicaSetAuth(HATestCase):
     def setUp(self):
         members = [
             {},
@@ -741,8 +805,8 @@ class TestReplicaSetAuth(unittest.TestCase):
         ]
 
         res = ha_tools.start_replica_set(members, auth=True)
-        self.c = ReplicaSetConnection(res[0], replicaSet=res[1],
-                                      use_greenlets=use_greenlets)
+        self.c = MongoReplicaSetClient(res[0], replicaSet=res[1],
+                                       use_greenlets=use_greenlets)
 
         # Add an admin user to enable auth
         self.c.admin.add_user('admin', 'adminpass')
@@ -755,7 +819,7 @@ class TestReplicaSetAuth(unittest.TestCase):
     def test_auth_during_failover(self):
         self.assertTrue(self.db.authenticate('user', 'userpass'))
         self.assertTrue(self.db.foo.insert({'foo': 'bar'},
-                                           safe=True, w=3, wtimeout=1000))
+                                           safe=True, w=3, wtimeout=3000))
         self.db.logout()
         self.assertRaises(OperationFailure, self.db.foo.find_one)
 
@@ -773,10 +837,10 @@ class TestReplicaSetAuth(unittest.TestCase):
 
     def tearDown(self):
         self.c.close()
-        ha_tools.kill_all_members()
+        super(TestReplicaSetAuth, self).tearDown()
 
 
-class TestAlive(unittest.TestCase):
+class TestAlive(HATestCase):
     def setUp(self):
         members = [{}, {}]
         self.seed, self.name = ha_tools.start_replica_set(members)
@@ -784,9 +848,9 @@ class TestAlive(unittest.TestCase):
     def test_alive(self):
         primary = ha_tools.get_primary()
         secondary = ha_tools.get_random_secondary()
-        primary_cx = Connection(primary, use_greenlets=use_greenlets)
-        secondary_cx = Connection(secondary, use_greenlets=use_greenlets)
-        rsc = ReplicaSetConnection(
+        primary_cx = MongoClient(primary, use_greenlets=use_greenlets)
+        secondary_cx = MongoClient(secondary, use_greenlets=use_greenlets)
+        rsc = MongoReplicaSetClient(
             self.seed, replicaSet=self.name, use_greenlets=use_greenlets)
 
         try:
@@ -810,29 +874,26 @@ class TestAlive(unittest.TestCase):
         finally:
             rsc.close()
 
-    def tearDown(self):
-        ha_tools.kill_all_members()
         
-        
-class TestMongosHighAvailability(unittest.TestCase):
+class TestMongosHighAvailability(HATestCase):
     def setUp(self):
         seed_list = ha_tools.create_sharded_cluster()
         self.dbname = 'pymongo_mongos_ha'
-        self.conn = Connection(seed_list)
-        self.conn.drop_database(self.dbname)
+        self.client = MongoClient(seed_list)
+        self.client.drop_database(self.dbname)
 
     def test_mongos_ha(self):
-        coll = self.conn[self.dbname].test
-        self.assertTrue(coll.insert({'foo': 'bar'}, safe=True))
+        coll = self.client[self.dbname].test
+        self.assertTrue(coll.insert({'foo': 'bar'}))
 
-        first = '%s:%d' % (self.conn.host, self.conn.port)
+        first = '%s:%d' % (self.client.host, self.client.port)
         ha_tools.kill_mongos(first)
         # Fail first attempt
         self.assertRaises(AutoReconnect, coll.count)
         # Find new mongos
         self.assertEqual(1, coll.count())
 
-        second = '%s:%d' % (self.conn.host, self.conn.port)
+        second = '%s:%d' % (self.client.host, self.client.port)
         self.assertNotEqual(first, second)
         ha_tools.kill_mongos(second)
         # Fail first attempt
@@ -840,7 +901,7 @@ class TestMongosHighAvailability(unittest.TestCase):
         # Find new mongos
         self.assertEqual(1, coll.count())
 
-        third = '%s:%d' % (self.conn.host, self.conn.port)
+        third = '%s:%d' % (self.client.host, self.client.port)
         self.assertNotEqual(second, third)
         ha_tools.kill_mongos(third)
         # Fail first attempt
@@ -853,16 +914,17 @@ class TestMongosHighAvailability(unittest.TestCase):
         self.assertEqual(1, coll.count())
 
     def tearDown(self):
-        self.conn.drop_database(self.dbname)
-        ha_tools.kill_all_members()
+        self.client.drop_database(self.dbname)
+        super(TestMongosHighAvailability, self).tearDown()
 
 
-class TestReplicaSetRequest(unittest.TestCase):
+class TestReplicaSetRequest(HATestCase):
     def setUp(self):
         members = [{}, {}, {'arbiterOnly': True}]
         res = ha_tools.start_replica_set(members)
-        self.c = ReplicaSetConnection(res[0], replicaSet=res[1],
-                                      use_greenlets=use_greenlets)
+        self.c = MongoReplicaSetClient(res[0], replicaSet=res[1],
+                                       use_greenlets=use_greenlets,
+                                       auto_start_request=True)
 
     def test_request_during_failover(self):
         primary = _partition_node(ha_tools.get_primary())
@@ -871,8 +933,9 @@ class TestReplicaSetRequest(unittest.TestCase):
         self.assertTrue(self.c.auto_start_request)
         self.assertTrue(self.c.in_request())
 
-        primary_pool = self.c._MongoReplicaSetClient__members[primary].pool
-        secondary_pool = self.c._MongoReplicaSetClient__members[secondary].pool
+        rs_state = self.c._MongoReplicaSetClient__rs_state
+        primary_pool = rs_state.get(primary).pool
+        secondary_pool = rs_state.get(secondary).pool
 
         # Trigger start_request on primary pool
         utils.assertReadFrom(self, self.c, primary, PRIMARY)
@@ -910,7 +973,7 @@ class TestReplicaSetRequest(unittest.TestCase):
 
     def tearDown(self):
         self.c.close()
-        ha_tools.kill_all_members()
+        super(TestReplicaSetRequest, self).tearDown()
 
 
 if __name__ == '__main__':

@@ -28,11 +28,11 @@ sys.path[0:0] = [""]
 from nose.plugins.skip import SkipTest
 
 import pymongo.pool
-from pymongo.connection import Connection
+from pymongo.mongo_client import MongoClient
 from pymongo.pool import Pool, NO_REQUEST, NO_SOCKET_YET, SocketInfo
 from pymongo.errors import ConfigurationError
-from test import version
-from test.test_connection import get_connection, host, port
+from test import version, host, port
+from test.test_client import get_client
 from test.utils import delay, is_mongos, one
 
 N = 50
@@ -53,11 +53,11 @@ except ImportError:
 
 
 class MongoThread(object):
-    """A thread, or a greenlet, that uses a Connection"""
+    """A thread, or a greenlet, that uses a MongoClient"""
     def __init__(self, test_case):
         self.use_greenlets = test_case.use_greenlets
-        self.connection = test_case.c
-        self.db = self.connection[DB]
+        self.client = test_case.c
+        self.db = self.client[DB]
         self.ut = test_case
         self.passed = False
 
@@ -96,7 +96,7 @@ class SaveAndFind(MongoThread):
     def run_mongo_thread(self):
         for _ in xrange(N):
             rand = random.randint(0, N)
-            _id = self.db.sf.save({"x": rand}, safe=True)
+            _id = self.db.sf.save({"x": rand})
             self.ut.assertEqual(rand, self.db.sf.find_one(_id)["x"])
 
 
@@ -104,40 +104,39 @@ class Unique(MongoThread):
 
     def run_mongo_thread(self):
         for _ in xrange(N):
-            self.connection.start_request()
-            self.db.unique.insert({})
-            self.ut.assertEqual(None, self.db.error())
-            self.connection.end_request()
+            self.client.start_request()
+            self.db.unique.insert({})  # no error
+            self.client.end_request()
 
 
 class NonUnique(MongoThread):
 
     def run_mongo_thread(self):
         for _ in xrange(N):
-            self.connection.start_request()
-            self.db.unique.insert({"_id": "jesse"})
+            self.client.start_request()
+            self.db.unique.insert({"_id": "jesse"}, w=0)
             self.ut.assertNotEqual(None, self.db.error())
-            self.connection.end_request()
+            self.client.end_request()
 
 
 class Disconnect(MongoThread):
 
     def run_mongo_thread(self):
         for _ in xrange(N):
-            self.connection.disconnect()
+            self.client.disconnect()
 
 
 class NoRequest(MongoThread):
 
     def run_mongo_thread(self):
-        self.connection.start_request()
+        self.client.start_request()
         errors = 0
         for _ in xrange(N):
-            self.db.unique.insert({"_id": "jesse"})
+            self.db.unique.insert({"_id": "jesse"}, w=0)
             if not self.db.error():
                 errors += 1
 
-        self.connection.end_request()
+        self.client.end_request()
         self.ut.assertEqual(0, errors)
 
 
@@ -149,7 +148,7 @@ def run_cases(ut, cases):
         and gevent.version_info[0] < 1
     ):
         # Gevent 0.13.6 bug on Mac, Greenlet.join() hangs if more than
-        # about 35 Greenlets share a Connection. Apparently fixed in
+        # about 35 Greenlets share a MongoClient. Apparently fixed in
         # recent Gevent development.
         nruns = 5
 
@@ -172,27 +171,27 @@ class OneOp(MongoThread):
         super(OneOp, self).__init__(ut)
 
     def run_mongo_thread(self):
-        pool = self.connection._MongoClient__pool
+        pool = self.client._MongoClient__pool
         assert len(pool.sockets) == 1, "Expected 1 socket, found %d" % (
             len(pool.sockets)
         )
 
         sock_info = one(pool.sockets)
 
-        self.connection.start_request()
+        self.client.start_request()
 
         # start_request() hasn't yet moved the socket from the general pool into
         # the request
         assert len(pool.sockets) == 1
         assert one(pool.sockets) == sock_info
 
-        self.connection[DB].test.find_one()
+        self.client[DB].test.find_one()
 
         # find_one() causes the socket to be used in the request, so now it's
         # bound to this thread
         assert len(pool.sockets) == 0
         assert pool._get_request_state() == sock_info
-        self.connection.end_request()
+        self.client.end_request()
 
         # The socket is back in the pool
         assert len(pool.sockets) == 1
@@ -211,9 +210,9 @@ class CreateAndReleaseSocket(MongoThread):
                 self.lock = threading.Lock()
                 self.ready = threading.Event()
 
-    def __init__(self, ut, connection, start_request, end_request, rendevous):
+    def __init__(self, ut, client, start_request, end_request, rendevous):
         super(CreateAndReleaseSocket, self).__init__(ut)
-        self.connection = connection
+        self.client = client
         self.start_request = start_request
         self.end_request = end_request
         self.rendevous = rendevous
@@ -224,10 +223,10 @@ class CreateAndReleaseSocket(MongoThread):
         # lots of simultaneous connections, to ensure that Pool obeys its
         # max_size configuration and closes extra sockets as they're returned.
         for i in range(self.start_request):
-            self.connection.start_request()
+            self.client.start_request()
 
         # Use a socket
-        self.connection[DB].test.find_one()
+        self.client[DB].test.find_one()
 
         # Don't finish until all threads reach this point
         r = self.rendevous
@@ -239,15 +238,15 @@ class CreateAndReleaseSocket(MongoThread):
             r.lock.release()
         else:
             r.lock.release()
-            r.ready.wait(2) # Wait two seconds
+            r.ready.wait(timeout=60)
             assert r.ready.isSet(), "Rendezvous timed out"
 
         for i in range(self.end_request):
-            self.connection.end_request()
+            self.client.end_request()
 
 
 class _TestPoolingBase(object):
-    """Base class for all connection-pool tests. Doesn't inherit from
+    """Base class for all client-pool tests. Doesn't inherit from
     unittest.TestCase, and its name is prefixed with "_" to avoid being
     run by nose. Real tests double-inherit from this base and from TestCase.
     """
@@ -260,18 +259,18 @@ class _TestPoolingBase(object):
 
             # Note we don't do patch_thread() or patch_all() - we're
             # testing here that patch_thread() is unnecessary for
-            # the connection pool to work properly.
+            # the client pool to work properly.
             monkey.patch_socket()
 
-        self.c = self.get_connection(auto_start_request=False)
+        self.c = self.get_client(auto_start_request=False)
 
         # reset the db
         db = self.c[DB]
         db.unique.drop()
         db.test.drop()
-        db.unique.insert({"_id": "jesse"}, safe=True)
+        db.unique.insert({"_id": "jesse"})
 
-        db.test.insert([{} for i in range(10)], safe=True)
+        db.test.insert([{} for i in range(10)])
 
     def tearDown(self):
         self.c.close()
@@ -279,10 +278,10 @@ class _TestPoolingBase(object):
             # Undo patch
             reload(socket)
 
-    def get_connection(self, *args, **kwargs):
+    def get_client(self, *args, **kwargs):
         opts = kwargs.copy()
         opts['use_greenlets'] = self.use_greenlets
-        return get_connection(*args, **opts)
+        return get_client(*args, **opts)
 
     def get_pool(self, *args, **kwargs):
         kwargs['use_greenlets'] = self.use_greenlets
@@ -313,23 +312,23 @@ class _TestPooling(_TestPoolingBase):
     """Basic pool tests, to be run both with threads and with greenlets."""
     def test_max_pool_size_validation(self):
         self.assertRaises(
-            ConfigurationError, Connection, host=host, port=port,
+            ConfigurationError, MongoClient, host=host, port=port,
             max_pool_size=-1
         )
 
         self.assertRaises(
-            ConfigurationError, Connection, host=host, port=port,
+            ConfigurationError, MongoClient, host=host, port=port,
             max_pool_size='foo'
         )
 
-        c = Connection(host=host, port=port, max_pool_size=100)
+        c = MongoClient(host=host, port=port, max_pool_size=100)
         self.assertEqual(c.max_pool_size, 100)
 
     def test_no_disconnect(self):
         run_cases(self, [NoRequest, NonUnique, Unique, SaveAndFind])
 
     def test_simple_disconnect(self):
-        # Connection just created, expect 1 free socket
+        # MongoClient just created, expect 1 free socket
         self.assert_pool_size(1)
         self.assert_no_request()
 
@@ -391,8 +390,8 @@ class _TestPooling(_TestPoolingBase):
         self.assert_pool_size(1)
 
     def test_multiple_connections(self):
-        a = self.get_connection(auto_start_request=False)
-        b = self.get_connection(auto_start_request=False)
+        a = self.get_client(auto_start_request=False)
+        b = self.get_client(auto_start_request=False)
         self.assertEqual(1, len(a._MongoClient__pool.sockets))
         self.assertEqual(1, len(b._MongoClient__pool.sockets))
 
@@ -653,10 +652,10 @@ class _TestPooling(_TestPoolingBase):
             # Access the thread local from the main thread to trigger the
             # ThreadVigil's delete callback, returning the request socket to
             # the pool.
-            # In Python 2.6 and lesser, a dead thread's locals are deleted
+            # In Python 2.7.0 and lesser, a dead thread's locals are deleted
             # and those locals' weakref callbacks are fired only when another
-            # thread accesses the locals and finds the thread state is stale.
-            # This is more or less a bug in Python <= 2.6. Accessing the thread
+            # thread accesses the locals and finds the thread state is stale,
+            # see http://bugs.python.org/issue1868. Accessing the thread
             # local from the main thread is a necessary part of this test, and
             # realistic: in a multithreaded web server a new thread will access
             # Pool._ident._local soon after an old thread has died.
@@ -665,6 +664,7 @@ class _TestPooling(_TestPoolingBase):
         # Pool reclaimed the socket
         self.assertEqual(1, len(cx_pool.sockets))
         self.assertEqual(the_sock[0], id(one(cx_pool.sockets).sock))
+        self.assertEqual(0, len(cx_pool._tid_to_sock))
 
 
 class _TestMaxPoolSize(_TestPoolingBase):
@@ -672,13 +672,26 @@ class _TestMaxPoolSize(_TestPoolingBase):
     no matter how start/end_request are called. To be run both with threads and
     with greenlets.
     """
-    def _test_max_pool_size(self, start_request, end_request):
-        c = self.get_connection(max_pool_size=4, auto_start_request=False)
-        # If you increase nthreads over about 35, note a
-        # Gevent 0.13.6 bug on Mac, Greenlet.join() hangs if more than
-        # about 35 Greenlets share a Connection. Apparently fixed in
-        # recent Gevent development.
-        nthreads = 10
+    def _test_max_pool_size(
+        self, start_request, end_request, max_pool_size=4, nthreads=10):
+        """Start `nthreads` threads. Each calls start_request `start_request`
+        times, then find_one and waits at a barrier; once all reach the barrier
+        each calls end_request `end_request` times. The test asserts that the
+        pool ends with min(max_pool_size, nthreads) sockets or, if
+        start_request wasn't called, at least one socket.
+
+        This tests both max_pool_size enforcement and that leaked request
+        sockets are eventually returned to the pool when their threads end.
+
+        You may need to increase ulimit -n on Mac.
+
+        If you increase nthreads over about 35, note a
+        Gevent 0.13.6 bug on Mac: Greenlet.join() hangs if more than
+        about 35 Greenlets share a MongoClient. Apparently fixed in
+        recent Gevent development.
+        """
+        c = self.get_client(
+            max_pool_size=max_pool_size, auto_start_request=False)
 
         rendevous = CreateAndReleaseSocket.Rendezvous(
             nthreads, self.use_greenlets)
@@ -694,6 +707,9 @@ class _TestMaxPoolSize(_TestPoolingBase):
 
         for t in threads:
             t.join()
+
+        # join() returns before the thread state is cleared; give it time.
+        time.sleep(1)
 
         for t in threads:
             self.assertTrue(t.passed)
@@ -717,13 +733,26 @@ class _TestMaxPoolSize(_TestPoolingBase):
                     the_hub.shutdown()
 
             if start_request:
-                self.assertEqual(4, len(cx_pool.sockets))
+                # Trigger final cleanup in Python <= 2.7.0.
+                cx_pool._ident.get()
+
+                expected_idle = min(max_pool_size, nthreads)
+                message = (
+                    '%d idle sockets (expected %d) and %d request sockets'
+                    ' (expected 0)' % (
+                        len(cx_pool.sockets), expected_idle,
+                        len(cx_pool._tid_to_sock)))
+
+                self.assertEqual(
+                    expected_idle, len(cx_pool.sockets), message)
             else:
                 # Without calling start_request(), threads can safely share
                 # sockets; the number running concurrently, and hence the number
-                # of sockets needed, is between 1 and 10, depending on thread-
-                # scheduling.
+                # of sockets needed, is between 1 and
+                # min(max_pool_size, nthreads), depending on thread-scheduling.
                 self.assertTrue(len(cx_pool.sockets) >= 1)
+
+            self.assertEqual(0, len(cx_pool._tid_to_sock))
 
     def test_max_pool_size(self):
         self._test_max_pool_size(0, 0)
@@ -733,6 +762,8 @@ class _TestMaxPoolSize(_TestPoolingBase):
 
     def test_max_pool_size_with_redundant_request(self):
         self._test_max_pool_size(2, 1)
+
+    def test_max_pool_size_with_redundant_request2(self):
         self._test_max_pool_size(20, 1)
 
     def test_max_pool_size_with_leaked_request(self):
@@ -760,14 +791,14 @@ class _TestPoolSocketSharing(_TestPoolingBase):
         gr1: get results
         gr0: get results
         """
-        cx = get_connection(
+        cx = get_client(
             use_greenlets=self.use_greenlets,
             auto_start_request=False
         )
 
         db = cx.pymongo_test
-        db.test.remove(safe=True)
-        db.test.insert({'_id': 1}, safe=True)
+        db.test.remove()
+        db.test.insert({'_id': 1})
 
         history = []
 

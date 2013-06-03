@@ -118,8 +118,6 @@ class Collection(common.BaseObject):
         """Sends a create command with the given options.
         """
 
-        # Send size as a float, not an int/long. BSON can only handle 32-bit
-        # ints which conflicts w/ max collection size of 10000000000.
         if options:
             if "size" in options:
                 options["size"] = float(options["size"])
@@ -631,11 +629,11 @@ class Collection(common.BaseObject):
             the start of the result set) when returning the results
           - `limit` (optional): the maximum number of results to
             return
-          - `timeout` (optional): if True, any returned cursor will be
-            subject to the normal timeout behavior of the mongod
-            process. Otherwise, the returned cursor will never timeout
-            at the server. Care should be taken to ensure that cursors
-            with timeout turned off are properly closed.
+          - `timeout` (optional): if True (the default), any returned
+            cursor is closed by the server after 10 minutes of
+            inactivity. If set to False, the returned cursor will never
+            time out on the server. Care should be taken to ensure that
+            cursors with timeout turned off are properly closed.
           - `snapshot` (optional): if True, snapshot mode will be used
             for this query. Snapshot mode assures no duplicates are
             returned, or objects missed, which were present at both
@@ -657,7 +655,7 @@ class Collection(common.BaseObject):
             examined when performing the query
           - `as_class` (optional): class to use for documents in the
             query result (default is
-            :attr:`~pymongo.connection.Connection.document_class`)
+            :attr:`~pymongo.mongo_client.MongoClient.document_class`)
           - `slave_okay` (optional): if True, allows this query to
             be run against a replica secondary.
           - `await_data` (optional): if True, the server will block for
@@ -669,13 +667,15 @@ class Collection(common.BaseObject):
             outgoing SON manipulators before returning.
           - `network_timeout` (optional): specify a timeout to use for
             this query, which will override the
-            :class:`~pymongo.connection.Connection`-level default
+            :class:`~pymongo.mongo_client.MongoClient`-level default
           - `read_preference` (optional): The read preference for
             this query.
           - `tag_sets` (optional): The tag sets for this query.
           - `secondary_acceptable_latency_ms` (optional): Any replica-set
             member whose ping time is within secondary_acceptable_latency_ms of
             the nearest member may accept reads. Default 15 milliseconds.
+            **Ignored by mongos** and must be configured on the command line.
+            See the localThreshold_ option for more information.
 
         .. note:: The `manipulate` parameter may default to False in
            a future release.
@@ -703,6 +703,7 @@ class Collection(common.BaseObject):
            The `tailable` parameter.
 
         .. mongodoc:: find
+        .. _localThreshold: http://docs.mongodb.org/manual/reference/mongos/#cmdoption-mongos--localThreshold
         """
         if not 'slave_okay' in kwargs:
             kwargs['slave_okay'] = self.slave_okay
@@ -743,7 +744,7 @@ class Collection(common.BaseObject):
         >>> my_collection.create_index([("mike", pymongo.DESCENDING),
         ...                             ("eliot", pymongo.ASCENDING)])
 
-        All optional index creation paramaters should be passed as
+        All optional index creation parameters should be passed as
         keyword arguments to this method. Valid options include:
 
           - `name`: custom name to use for this index - if none is
@@ -752,8 +753,9 @@ class Collection(common.BaseObject):
           - `dropDups` or `drop_dups`: should we drop duplicates
           - `background`: if this index should be created in the
             background
-          - `bucketSize` or `bucket_size`: size of buckets for geoHaystack
-            indexes during index creation when creating a unique index?
+          - `bucketSize` or `bucket_size`: for use with geoHaystack indexes.
+            Number of documents to group together within a certain proximity
+            to a given longitude and latitude.
           - `min`: minimum value for keys in a :data:`~pymongo.GEO2D`
             index
           - `max`: maximum value for keys in a :data:`~pymongo.GEO2D`
@@ -798,7 +800,7 @@ class Collection(common.BaseObject):
         if 'ttl' in kwargs:
             cache_for = kwargs.pop('ttl')
             warnings.warn("ttl is deprecated. Please use cache_for instead.",
-                          DeprecationWarning)
+                          DeprecationWarning, stacklevel=2)
 
         keys = helpers._index_list(key_or_list)
         index_doc = helpers._index_document(keys)
@@ -845,15 +847,15 @@ class Collection(common.BaseObject):
         actually create the index.
 
         Care must be taken when the database is being accessed through
-        multiple connections at once. If an index is created using
-        PyMongo and then deleted using another connection any call to
+        multiple clients at once. If an index is created using
+        this client and deleted using another, any call to
         :meth:`ensure_index` within the cache window will fail to
         re-create the missing index.
 
         Returns the name of the created index if an index is actually
         created. Returns ``None`` if the index already exists.
 
-        All optional index creation paramaters should be passed as
+        All optional index creation parameters should be passed as
         keyword arguments to this method. Valid options include:
 
           - `name`: custom name to use for this index - if none is
@@ -863,8 +865,9 @@ class Collection(common.BaseObject):
             during index creation when creating a unique index?
           - `background`: if this index should be created in the
             background
-          - `bucketSize` or `bucket_size`: size of buckets for geoHaystack
-            indexes during index creation when creating a unique index?
+          - `bucketSize` or `bucket_size`: for use with geoHaystack indexes.
+            Number of documents to group together within a certain proximity
+            to a given longitude and latitude.
           - `min`: minimum value for keys in a :data:`~pymongo.GEO2D`
             index
           - `max`: maximum value for keys in a :data:`~pymongo.GEO2D`
@@ -1023,7 +1026,7 @@ class Collection(common.BaseObject):
         """Perform an aggregation using the aggregation framework on this
         collection.
 
-        With :class:`~pymongo.replica_set_connection.ReplicaSetConnection`
+        With :class:`~pymongo.mongo_replica_set_client.MongoReplicaSetClient`
         or :class:`~pymongo.master_slave_connection.MasterSlaveConnection`,
         if the `read_preference` attribute of this instance is not set to
         :attr:`pymongo.read_preferences.ReadPreference.PRIMARY` or the
@@ -1074,7 +1077,7 @@ class Collection(common.BaseObject):
             function to be applied to each document, returning the key
             to group by.
 
-        With :class:`~pymongo.replica_set_connection.ReplicaSetConnection`
+        With :class:`~pymongo.mongo_replica_set_client.MongoReplicaSetClient`
         or :class:`~pymongo.master_slave_connection.MasterSlaveConnection`,
         if the `read_preference` attribute of this instance is not set to
         :attr:`pymongo.read_preferences.ReadPreference.PRIMARY` or
@@ -1256,7 +1259,7 @@ class Collection(common.BaseObject):
         result documents in a list. Otherwise, returns the full
         response from the server to the `map reduce command`_.
 
-        With :class:`~pymongo.replica_set_connection.ReplicaSetConnection`
+        With :class:`~pymongo.mongo_replica_set_client.MongoReplicaSetClient`
         or :class:`~pymongo.master_slave_connection.MasterSlaveConnection`,
         if the `read_preference` attribute of this instance is not set to
         :attr:`pymongo.read_preferences.ReadPreference.PRIMARY` or
@@ -1299,7 +1302,7 @@ class Collection(common.BaseObject):
             return res.get("results")
 
     def find_and_modify(self, query={}, update=None,
-                        upsert=False, sort=None, **kwargs):
+                        upsert=False, sort=None, full_response=False, **kwargs):
         """Update and return an object.
 
         This is a thin wrapper around the findAndModify_ command. The
@@ -1312,6 +1315,12 @@ class Collection(common.BaseObject):
         parameter. If no objects match the `query` and `upsert` is false,
         returns ``None``. If upserting and `new` is false, returns ``{}``.
 
+        If the full_response parameter is ``True``, the return value will be
+        the entire response object from the server, including the 'ok' and
+        'lastErrorObject' fields, rather than just the modified object.
+        This is useful mainly because the 'lastErrorObject' document holds 
+        information about the command's execution.
+
         :Parameters:
             - `query`: filter for the update (default ``{}``)
             - `update`: see second argument to :meth:`update` (no default)
@@ -1319,6 +1328,8 @@ class Collection(common.BaseObject):
             - `sort`: a list of (key, direction) pairs specifying the sort
               order for this query. See :meth:`~pymongo.cursor.Cursor.sort`
               for details.
+            - `full_response`: return the entire response object from the
+              server (default ``False``)
             - `remove`: remove rather than updating (default ``False``)
             - `new`: return updated rather than original object
               (default ``False``)
@@ -1332,6 +1343,9 @@ class Collection(common.BaseObject):
         .. _findAndModify: http://dochub.mongodb.org/core/findAndModify
 
         .. note:: Requires server version **>= 1.3.0**
+
+        .. versionchanged:: 2.5
+           Added the optional full_response parameter
 
         .. versionchanged:: 2.4
            Deprecated the use of mapping types for the sort parameter
@@ -1361,7 +1375,7 @@ class Collection(common.BaseObject):
                   isinstance(sort, dict) and len(sort) == 1):
                 warnings.warn("Passing mapping types for `sort` is deprecated,"
                               " use a list of (key, direction) pairs instead",
-                              DeprecationWarning)
+                              DeprecationWarning, stacklevel=2)
                 kwargs['sort'] = sort
             else:
                 raise TypeError("sort must be a list of (key, direction) "
@@ -1382,7 +1396,10 @@ class Collection(common.BaseObject):
                 # Should never get here b/c of allowable_errors
                 raise ValueError("Unexpected Error: %s" % (out,))
 
-        return out.get('value')
+        if full_response:
+            return out
+        else:
+            return out.get('value')
 
     def __iter__(self):
         return self

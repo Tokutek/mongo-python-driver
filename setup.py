@@ -31,7 +31,7 @@ from distutils.errors import CCompilerError
 from distutils.errors import DistutilsPlatformError, DistutilsExecError
 from distutils.core import Extension
 
-version = "2.4.2"
+version = "2.5.2"
 
 f = open("README.rst")
 try:
@@ -259,6 +259,8 @@ if PY3:
         # are testing.
         # https://bitbucket.org/tarek/distribute/issue/233
         extra_opts["packages"].append("test")
+        extra_opts['package_data'] = {"test": ["certificates/ca.pem",
+                                               "certificates/client.pem"]}
         # Hack to make "python3.x setup.py nosetests" work in python 3
         # otherwise it won't run 2to3 before running the tests.
         if "nosetests" in sys.argv:

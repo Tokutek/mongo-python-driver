@@ -42,13 +42,14 @@ import time
 import warnings
 
 from bson.py3compat import b
-from bson.son import SON
-from pymongo import (common,
+from pymongo import (auth,
+                     common,
                      database,
                      helpers,
                      message,
                      pool,
                      uri_parser)
+from pymongo.common import HAS_SSL
 from pymongo.cursor_manager import CursorManager
 from pymongo.errors import (AutoReconnect,
                             ConfigurationError,
@@ -59,6 +60,7 @@ from pymongo.errors import (AutoReconnect,
                             OperationFailure)
 
 EMPTY = b("")
+
 
 def _partition_node(node):
     """Split a host:port string returned from mongod/s into
@@ -87,7 +89,7 @@ class MongoClient(common.BaseObject):
                  document_class=dict, tz_aware=False, _connect=True, **kwargs):
         """Create a new connection to a single MongoDB instance at *host:port*.
 
-        The resultant connection object has connection-pooling built
+        The resultant client object has connection-pooling built
         in. It also performs auto-reconnection when necessary. If an
         operation fails because of a connection error,
         :class:`~pymongo.errors.ConnectionFailure` is raised. If
@@ -121,20 +123,34 @@ class MongoClient(common.BaseObject):
           - `max_pool_size` (optional): The maximum number of idle connections
             to keep open in the pool for future use
           - `document_class` (optional): default class to use for
-            documents returned from queries on this connection
+            documents returned from queries on this client
           - `tz_aware` (optional): if ``True``,
             :class:`~datetime.datetime` instances returned as values
             in a document by this :class:`MongoClient` will be timezone
             aware (otherwise they will be naive)
 
-          **Other optional parameters can be passed as keyword arguments:**
+          | **Other optional parameters can be passed as keyword arguments:**
+
+          - `socketTimeoutMS`: (integer) How long (in milliseconds) a send or
+            receive on a socket can take before timing out.
+          - `connectTimeoutMS`: (integer) How long (in milliseconds) a
+            connection can take to be opened before timing out.
+          - `auto_start_request`: If ``True``, each thread that accesses
+            this :class:`MongoClient` has a socket allocated to it for the
+            thread's lifetime.  This ensures consistent reads, even if you
+            read after an unacknowledged write. Defaults to ``False``
+          - `use_greenlets`: If ``True``, :meth:`start_request()` will ensure
+            that the current greenlet uses the same socket for all
+            operations until :meth:`end_request()`
+
+          | **Write Concern options:**
 
           - `w`: (integer or string) If this is a replica set, write operations
             will block until they have been replicated to the specified number
             or tagged set of servers. `w=<int>` always includes the replica set
             primary (e.g. w=3 means write to the primary and wait until
-            replicated to **two** secondaries). **Passing w=0 disables write
-            acknowledgement and all other write concern options.**
+            replicated to **two** secondaries). Passing w=0 **disables write
+            acknowledgement** and all other write concern options.
           - `wtimeout`: (integer) Used in conjunction with `w`. Specify a value
             in milliseconds to control how long to wait for write propagation
             to complete. If replication does not complete in the given
@@ -144,30 +160,55 @@ class MongoClient(common.BaseObject):
           - `fsync`: If ``True`` force the database to fsync all files before
             returning. When used with `j` the server awaits the next group
             commit before returning.
+
+          | **Replica set keyword arguments for connecting with a replica set
+            - either directly or via a mongos:**
+          | (ignored by standalone mongod instances)
+
           - `replicaSet`: (string) The name of the replica set to connect to.
             The driver will verify that the replica set it connects to matches
             this name. Implies that the hosts specified are a seed list and the
-            driver should attempt to find all members of the set.
-          - `socketTimeoutMS`: (integer) How long (in milliseconds) a send or
-            receive on a socket can take before timing out.
-          - `connectTimeoutMS`: (integer) How long (in milliseconds) a
-            connection can take to be opened before timing out.
+            driver should attempt to find all members of the set. *Ignored by
+            mongos*.
+          - `read_preference`: The read preference for this client. If
+            connecting to a secondary then a read preference mode *other* than
+            PRIMARY is required - otherwise all queries will throw
+            :class:`~pymongo.errors.AutoReconnect` "not master".
+            See :class:`~pymongo.read_preferences.ReadPreference` for all
+            available read preference options.
+          - `tag_sets`: Ignored unless connecting to a replica set via mongos.
+            Specify a priority-order for tag sets, provide a list of
+            tag sets: ``[{'dc': 'ny'}, {'dc': 'la'}, {}]``. A final, empty tag
+            set, ``{}``, means "read from any member that matches the mode,
+            ignoring tags.
+
+          | **SSL configuration:**
+
           - `ssl`: If ``True``, create the connection to the server using SSL.
-          - `read_preference`: The read preference for this connection.
-            See :class:`~pymongo.read_preferences.ReadPreference` for available
-            options.
-          - `auto_start_request`: If ``True``, each thread that accesses
-            this :class:`MongoClient` has a socket allocated to it for the
-            thread's lifetime.  This ensures consistent reads, even if you
-            read after an unacknowledged write. Defaults to ``False``
-          - `use_greenlets`: If ``True``, :meth:`start_request()` will ensure
-            that the current greenlet uses the same socket for all
-            operations until :meth:`end_request()`
+          - `ssl_keyfile`: The private keyfile used to identify the local
+            connection against mongod.  If included with the ``certfile` then
+            only the ``ssl_certfile`` is needed.  Implies ``ssl=True``.
+          - `ssl_certfile`: The certificate file used to identify the local
+            connection against mongod. Implies ``ssl=True``.
+          - `ssl_cert_reqs`: Specifies whether a certificate is required from
+            the other side of the connection, and whether it will be validated
+            if provided. It must be one of the three values ``ssl.CERT_NONE``
+            (certificates ignored), ``ssl.CERT_OPTIONAL``
+            (not required, but validated if provided), or ``ssl.CERT_REQUIRED``
+            (required and validated). If the value of this parameter is not
+            ``ssl.CERT_NONE``, then the ``ssl_ca_certs`` parameter must point
+            to a file of CA certificates. Implies ``ssl=True``.
+          - `ssl_ca_certs`: The ca_certs file contains a set of concatenated
+            "certification authority" certificates, which are used to validate
+            certificates passed from the other end of the connection.
+            Implies ``ssl=True``.
 
         .. seealso:: :meth:`end_request`
 
         .. mongodoc:: connections
 
+        .. versionchanged:: 2.5
+           Added additional ssl options
         .. versionadded:: 2.4
         """
         if host is None:
@@ -182,7 +223,7 @@ class MongoClient(common.BaseObject):
         seeds = set()
         username = None
         password = None
-        db = None
+        db_name = None
         opts = {}
         for entity in host:
             if "://" in entity:
@@ -191,7 +232,7 @@ class MongoClient(common.BaseObject):
                     seeds.update(res["nodelist"])
                     username = res["username"] or username
                     password = res["password"] or password
-                    db = res["database"] or db
+                    db_name = res["database"] or db_name
                     opts = res["options"]
                 else:
                     idx = entity.find("://")
@@ -232,8 +273,30 @@ class MongoClient(common.BaseObject):
 
         self.__net_timeout = options.get('sockettimeoutms')
         self.__conn_timeout = options.get('connecttimeoutms')
-        self.__use_ssl = options.get('ssl', False)
-        if self.__use_ssl and not pool.have_ssl:
+        self.__use_ssl = options.get('ssl', None)
+        self.__ssl_keyfile = options.get('ssl_keyfile', None)
+        self.__ssl_certfile = options.get('ssl_certfile', None)
+        self.__ssl_cert_reqs = options.get('ssl_cert_reqs', None)
+        self.__ssl_ca_certs = options.get('ssl_ca_certs', None)
+
+        ssl_kwarg_keys = [k for k in kwargs.keys() if k.startswith('ssl_')]
+        if self.__use_ssl == False and ssl_kwarg_keys:
+            raise ConfigurationError("ssl has not been enabled but the "
+                                     "following ssl parameters have been set: "
+                                     "%s. Please set `ssl=True` or remove."
+                                     % ', '.join(ssl_kwarg_keys))
+
+        if self.__ssl_cert_reqs and not self.__ssl_ca_certs:
+                raise ConfigurationError("If `ssl_cert_reqs` is not "
+                                         "`ssl.CERT_NONE` then you must "
+                                         "include `ssl_ca_certs` to be able "
+                                         "to validate the server.")
+
+        if ssl_kwarg_keys and self.__use_ssl is None:
+            # ssl options imply ssl = True
+            self.__use_ssl = True
+
+        if self.__use_ssl and not HAS_SSL:
             raise ConfigurationError("The ssl module is not available. If you "
                                      "are using a python version previous to "
                                      "2.6 you must install the ssl package "
@@ -246,7 +309,11 @@ class MongoClient(common.BaseObject):
             self.__net_timeout,
             self.__conn_timeout,
             self.__use_ssl,
-            use_greenlets=self.__use_greenlets)
+            use_greenlets=self.__use_greenlets,
+            ssl_keyfile=self.__ssl_keyfile,
+            ssl_certfile=self.__ssl_certfile,
+            ssl_cert_reqs=self.__ssl_cert_reqs,
+            ssl_ca_certs=self.__ssl_ca_certs)
 
         self.__document_class = document_class
         self.__tz_aware = common.validate_boolean('tz_aware', tz_aware)
@@ -259,7 +326,8 @@ class MongoClient(common.BaseObject):
         super(MongoClient, self).__init__(**options)
         if self.slave_okay:
             warnings.warn("slave_okay is deprecated. Please "
-                          "use read_preference instead.", DeprecationWarning)
+                          "use read_preference instead.", DeprecationWarning,
+                          stacklevel=2)
 
         if _connect:
             try:
@@ -268,14 +336,23 @@ class MongoClient(common.BaseObject):
                 # ConnectionFailure makes more sense here than AutoReconnect
                 raise ConnectionFailure(str(e))
 
-        if db and username is None:
-            warnings.warn("database name in URI is being ignored. If you wish "
-                          "to authenticate to %s, you must provide a username "
-                          "and password." % (db,))
+        db_name = options.get('authsource', db_name)
+        if db_name and username is None:
+            warnings.warn("database name or authSource in URI is being "
+                          "ignored. If you wish to authenticate to %s, you "
+                          "must provide a username and password." % (db_name,))
         if username:
-            db = db or "admin"
-            if not self[db].authenticate(username, password):
-                raise ConfigurationError("authentication failed")
+            mechanism = options.get('authmechanism', 'MONGODB-CR')
+            if mechanism == 'GSSAPI':
+                source = '$external'
+            else:
+                source = db_name or 'admin'
+            credentials = (source, unicode(username),
+                           unicode(password), mechanism)
+            try:
+                self._cache_credentials(source, credentials, _connect)
+            except OperationFailure, exc:
+                raise ConfigurationError(str(exc))
 
     def _cached(self, dbname, coll, index):
         """Test if `index` is cached.
@@ -330,45 +407,53 @@ class MongoClient(common.BaseObject):
         if index_name in self.__index_cache[database_name][collection_name]:
             del self.__index_cache[database_name][collection_name][index_name]
 
-    def _cache_credentials(self, db_name, username, password):
+    def _cache_credentials(self, source, credentials, connect=True):
         """Add credentials to the database authentication cache
-        for automatic login when a socket is created.
-
-        If credentials are already cached for `db_name` they
-        will be replaced.
+        for automatic login when a socket is created. If `connect` is True,
+        verify the credentials on the server first.
         """
-        self.__auth_credentials[db_name] = (username, password)
+        if source in self.__auth_credentials:
+            # Nothing to do if we already have these credentials.
+            if credentials == self.__auth_credentials[source]:
+                return
+            raise OperationFailure('Another user is already authenticated '
+                                   'to this database. You must logout first.')
 
-    def _purge_credentials(self, db_name=None):
+        if connect:
+            sock_info = self.__socket()
+            try:
+                # Since __check_auth was called in __socket
+                # there is no need to call it here.
+                auth.authenticate(credentials, sock_info, self.__simple_command)
+                sock_info.authset.add(credentials)
+            finally:
+                self.__pool.maybe_return_socket(sock_info)
+
+        self.__auth_credentials[source] = credentials
+
+    def _purge_credentials(self, source):
         """Purge credentials from the database authentication cache.
-
-        If `db_name` is None purge credentials for all databases.
         """
-        if db_name is None:
-            self.__auth_credentials.clear()
-        elif db_name in self.__auth_credentials:
-            del self.__auth_credentials[db_name]
+        if source in self.__auth_credentials:
+            del self.__auth_credentials[source]
 
     def __check_auth(self, sock_info):
         """Authenticate using cached database credentials.
         """
-        authset = sock_info.authset
-        names = set(self.__auth_credentials.iterkeys())
+        if self.__auth_credentials or sock_info.authset:
+            cached = set(self.__auth_credentials.itervalues())
 
-        # Logout from any databases no longer listed in the credentials cache.
-        for dbname in authset - names:
-            try:
-                self.__simple_command(sock_info, dbname, {'logout': 1})
-            # TODO: We used this socket to logout. Fix logout so we don't
-            # have to catch this.
-            except OperationFailure:
-                pass
-            authset.discard(dbname)
+            authset = sock_info.authset.copy()
 
-        for db_name in names - authset:
-            user, pwd = self.__auth_credentials[db_name]
-            self.__auth(sock_info, db_name, user, pwd)
-            authset.add(db_name)
+            # Logout any credentials that no longer exist in the cache.
+            for credentials in authset - cached:
+                self.__simple_command(sock_info, credentials[0], {'logout': 1})
+                sock_info.authset.discard(credentials)
+
+            for credentials in cached - authset:
+                auth.authenticate(credentials,
+                                  sock_info, self.__simple_command)
+                sock_info.authset.add(credentials)
 
     @property
     def host(self):
@@ -390,7 +475,7 @@ class MongoClient(common.BaseObject):
 
     @property
     def is_primary(self):
-        """If this instance is connected to a standalone, a replica-set
+        """If this instance is connected to a standalone, a replica set
         primary, or the master of a master-slave set.
 
         .. versionadded:: 2.3
@@ -454,14 +539,14 @@ class MongoClient(common.BaseObject):
 
     document_class = property(get_document_class, set_document_class,
                               doc="""Default class to use for documents
-                              returned on this connection.
+                              returned from this client.
 
                               .. versionadded:: 1.7
                               """)
 
     @property
     def tz_aware(self):
-        """Does this connection return timezone-aware datetimes?
+        """Does this client return timezone-aware datetimes?
 
         .. versionadded:: 1.8
         """
@@ -493,19 +578,6 @@ class MongoClient(common.BaseObject):
         msg = "command %r failed: %%s" % spec
         helpers._check_command_response(response, None, msg)
         return response, end - start
-
-    def __auth(self, sock_info, dbname, user, passwd):
-        """Authenticate socket against database `dbname`.
-        """
-        # Get a nonce
-        response, _ = self.__simple_command(sock_info, dbname, {'getnonce': 1})
-        nonce = response['nonce']
-        key = helpers._auth_key(nonce, user, passwd)
-
-        # Actually authenticate
-        query = SON([('authenticate', 1),
-            ('user', user), ('nonce', nonce), ('key', key)])
-        self.__simple_command(sock_info, dbname, query)
 
     def __try_node(self, node):
         """Try to connect to this node and see if it works for our connection
@@ -662,8 +734,11 @@ class MongoClient(common.BaseObject):
                 host_details = "%s:%d:" % (host, port)
             raise AutoReconnect("could not connect to "
                                 "%s %s" % (host_details, str(why)))
-        if self.__auth_credentials:
+        try:
             self.__check_auth(sock_info)
+        except OperationFailure:
+            self.__pool.maybe_return_socket(sock_info)
+            raise
         return sock_info
 
     def disconnect(self):
@@ -709,7 +784,7 @@ class MongoClient(common.BaseObject):
 
         A more certain way to determine server availability is::
 
-            connection.admin.command('ping')
+            client.admin.command('ping')
 
         .. _select: http://docs.python.org/2/library/select.html#select.select
         """
@@ -726,7 +801,7 @@ class MongoClient(common.BaseObject):
             return False
 
     def set_cursor_manager(self, manager_class):
-        """Set this connection's cursor manager.
+        """Set this client's cursor manager.
 
         Raises :class:`TypeError` if `manager_class` is not a subclass of
         :class:`~pymongo.cursor_manager.CursorManager`. A cursor manager
@@ -741,7 +816,8 @@ class MongoClient(common.BaseObject):
            Deprecated support for external cursor managers.
         """
         warnings.warn("Support for external cursor managers is deprecated "
-                      "and will be removed in PyMongo 3.0.", DeprecationWarning)
+                      "and will be removed in PyMongo 3.0.",
+                      DeprecationWarning, stacklevel=2)
         manager = manager_class(self)
         if not isinstance(manager, CursorManager):
             raise TypeError("manager_class must be a subclass of "
@@ -781,8 +857,8 @@ class MongoClient(common.BaseObject):
                     break
 
         if "code" in details:
-            if details["code"] in [11000, 11001, 12582]:
-                raise DuplicateKeyError(details["err"])
+            if details["code"] in (11000, 11001, 12582):
+                raise DuplicateKeyError(details["err"], details["code"])
             else:
                 raise OperationFailure(details["err"], details["code"])
         else:
@@ -938,10 +1014,10 @@ class MongoClient(common.BaseObject):
         "from __future__ import with_statement", :meth:`start_request` can be
         used as a context manager:
 
-        >>> connection = pymongo.MongoClient(auto_start_request=False)
-        >>> db = connection.test
+        >>> client = pymongo.MongoClient(auto_start_request=False)
+        >>> db = client.test
         >>> _id = db.test_collection.insert({})
-        >>> with connection.start_request():
+        >>> with client.start_request():
         ...     for i in range(100):
         ...         db.test_collection.update({'_id': _id}, {'$set': {'i':i}})
         ...
@@ -1029,13 +1105,10 @@ class MongoClient(common.BaseObject):
 
         Raises :class:`TypeError` if `cursor_id` is not an instance of
         ``(int, long)``. What closing the cursor actually means
-        depends on this connection's cursor manager.
+        depends on this client's cursor manager.
 
         :Parameters:
           - `cursor_id`: id of cursor to close
-
-        .. seealso:: :meth:`set_cursor_manager` and
-           the :mod:`~pymongo.cursor_manager` module
         """
         if not isinstance(cursor_id, (int, long)):
             raise TypeError("cursor_id must be an instance of (int, long)")
@@ -1138,7 +1211,7 @@ class MongoClient(common.BaseObject):
                                            fromhost=from_host)["nonce"]
                 command["username"] = username
                 command["nonce"] = nonce
-                command["key"] = helpers._auth_key(nonce, username, password)
+                command["key"] = auth._auth_key(nonce, username, password)
 
             return self.admin.command("copydb", **command)
         finally:

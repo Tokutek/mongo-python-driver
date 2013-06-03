@@ -1,6 +1,59 @@
 Changelog
 =========
 
+Changes in Version 2.5.2
+------------------------
+
+Version 2.5.2 fixes a NULL pointer dereference issue when decoding
+an invalid :class:`~bson.dbref.DBRef`.
+
+Issues Resolved
+...............
+
+See the `PyMongo 2.5.2 release notes in JIRA`_ for the list of resolved issues
+in this release.
+
+.. _PyMongo 2.5.2 release notes in JIRA: https://jira.mongodb.org/browse/PYTHON/fixforversion/12581
+
+Changes in Version 2.5.1
+------------------------
+
+Version 2.5.1 is a minor release that fixes issues discovered after the
+release of 2.5. Most importantly, this release addresses some race
+conditions in replica set monitoring.
+
+Issues Resolved
+...............
+
+See the `PyMongo 2.5.1 release notes in JIRA`_ for the list of resolved issues
+in this release.
+
+.. _PyMongo 2.5.1 release notes in JIRA: https://jira.mongodb.org/browse/PYTHON/fixforversion/12484
+
+Changes in Version 2.5
+----------------------
+
+Version 2.5 includes changes to support new features in MongoDB 2.4.
+
+Important new features:
+
+- Support for :ref:`GSSAPI (Kerberos) authentication <use_kerberos>`.
+- Support for SSL certificate validation with hostname matching.
+- Support for delegated and role based authentication.
+- New GEOSPHERE (2dsphere) and HASHED index constants.
+
+.. note:: :meth:`~pymongo.database.Database.authenticate` now raises a
+    subclass of :class:`~pymongo.errors.PyMongoError` if authentication
+    fails due to invalid credentials or configuration issues.
+
+Issues Resolved
+...............
+
+See the `PyMongo 2.5 release notes in JIRA`_ for the list of resolved issues
+in this release.
+
+.. _PyMongo 2.5 release notes in JIRA: https://jira.mongodb.org/browse/PYTHON/fixforversion/11981
+
 Changes in Version 2.4.2
 ------------------------
 

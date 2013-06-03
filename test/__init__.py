@@ -15,11 +15,32 @@
 """Clean up databases after running `nosetests`.
 """
 
-from test.test_connection import get_connection
+import os
+
+import pymongo
+from pymongo.errors import ConnectionFailure
+
+# hostnames retrieved by MongoReplicaSetClient from isMaster will be of unicode
+# type in Python 2, so ensure these hostnames are unicodes, too. It makes tests
+# like `test_repr` predictable.
+host = unicode(os.environ.get("DB_IP", 'localhost'))
+port = int(os.environ.get("DB_PORT", 27017))
+pair = '%s:%d' % (host, port)
+
+host2 = unicode(os.environ.get("DB_IP2", 'localhost'))
+port2 = int(os.environ.get("DB_PORT2", 27018))
+
+host3 = unicode(os.environ.get("DB_IP3", 'localhost'))
+port3 = int(os.environ.get("DB_PORT3", 27019))
 
 
 def teardown():
-    c = get_connection()
+    try:
+        c = pymongo.MongoClient(host, port)
+    except ConnectionFailure:
+        # Tests where ssl=True can cause connection failures here.
+        # Ignore and continue.
+        return
 
     c.drop_database("pymongo-pooling-tests")
     c.drop_database("pymongo_test")

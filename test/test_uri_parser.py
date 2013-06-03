@@ -18,6 +18,8 @@ import copy
 import unittest
 import sys
 
+sys.path[0:0] = [""]
+
 from pymongo.uri_parser import (_partition,
                                 _rpartition,
                                 parse_userinfo,
@@ -44,8 +46,6 @@ class TestURI(unittest.TestCase):
         self.assertRaises(InvalidURI, parse_userinfo,
                           ':password')
         self.assertRaises(InvalidURI, parse_userinfo,
-                          'user:')
-        self.assertRaises(InvalidURI, parse_userinfo,
                           'fo::o:p@ssword')
         self.assertRaises(InvalidURI, parse_userinfo, ':')
         self.assertTrue(parse_userinfo('user:password'))
@@ -57,6 +57,10 @@ class TestURI(unittest.TestCase):
                          parse_userinfo('us%20er:p%20ssword'))
         self.assertEqual(('us+er', 'p+ssword'),
                          parse_userinfo('us%2Ber:p%2Bssword'))
+        self.assertEqual(('dev1@FOO.COM', ''),
+                         parse_userinfo('dev1%40FOO.COM'))
+        self.assertEqual(('dev1@FOO.COM', ''),
+                         parse_userinfo('dev1%40FOO.COM:'))
 
     def test_split_hosts(self):
         self.assertRaises(ConfigurationError, split_hosts,
@@ -122,6 +126,11 @@ class TestURI(unittest.TestCase):
         self.assertRaises(ConfigurationError, split_options, 'fsync=5.5')
         self.assertEqual({'fsync': True}, split_options('fsync=true'))
         self.assertEqual({'fsync': False}, split_options('fsync=false'))
+        self.assertEqual({'authmechanism': 'GSSAPI'},
+                         split_options('authMechanism=GSSAPI'))
+        self.assertEqual({'authmechanism': 'MONGODB-CR'},
+                         split_options('authMechanism=MONGODB-CR'))
+        self.assertEqual({'authsource': 'foobar'}, split_options('authSource=foobar'))
         # maxPoolSize isn't yet a documented URI option.
         self.assertRaises(ConfigurationError, split_options, 'maxpoolsize=50')
 
@@ -273,6 +282,67 @@ class TestURI(unittest.TestCase):
         res['options'] = {'readpreference': ReadPreference.SECONDARY}
         self.assertEqual(res,
                          parse_uri("mongodb://localhost/?readPreference=secondary"))
+
+        # Various authentication tests
+        res = copy.deepcopy(orig)
+        res['options'] = {'authmechanism': 'MONGODB-CR'}
+        res['username'] = 'user'
+        res['password'] = 'password'
+        self.assertEqual(res,
+                         parse_uri("mongodb://user:password@localhost/"
+                                   "?authMechanism=MONGODB-CR"))
+
+        res = copy.deepcopy(orig)
+        res['options'] = {'authmechanism': 'MONGODB-CR', 'authsource': 'bar'}
+        res['username'] = 'user'
+        res['password'] = 'password'
+        res['database'] = 'foo'
+        self.assertEqual(res,
+                         parse_uri("mongodb://user:password@localhost/foo"
+                                   "?authSource=bar;authMechanism=MONGODB-CR"))
+
+        res = copy.deepcopy(orig)
+        res['options'] = {'authmechanism': 'MONGODB-CR'}
+        res['username'] = 'user'
+        res['password'] = ''
+        self.assertEqual(res,
+                         parse_uri("mongodb://user:@localhost/"
+                                   "?authMechanism=MONGODB-CR"))
+
+        res = copy.deepcopy(orig)
+        res['username'] = 'user@domain.com'
+        res['password'] = 'password'
+        res['database'] = 'foo'
+        self.assertEqual(res,
+                         parse_uri("mongodb://user%40domain.com:password"
+                                   "@localhost/foo"))
+
+        res = copy.deepcopy(orig)
+        res['options'] = {'authmechanism': 'GSSAPI'}
+        res['username'] = 'user@domain.com'
+        res['password'] = 'password'
+        res['database'] = 'foo'
+        self.assertEqual(res,
+                         parse_uri("mongodb://user%40domain.com:password"
+                                   "@localhost/foo?authMechanism=GSSAPI"))
+
+        res = copy.deepcopy(orig)
+        res['options'] = {'authmechanism': 'GSSAPI'}
+        res['username'] = 'user@domain.com'
+        res['password'] = ''
+        res['database'] = 'foo'
+        self.assertEqual(res,
+                         parse_uri("mongodb://user%40domain.com"
+                                   "@localhost/foo?authMechanism=GSSAPI"))
+
+    def test_parse_uri_unicode(self):
+        # Ensure parsing a unicode returns option names that can be passed
+        # as kwargs. In Python 2.4, keyword argument names must be ASCII.
+        # In all Pythons, str is the type of valid keyword arg names.
+        res = parse_uri(unicode("mongodb://localhost/?fsync=true"))
+        for key in res['options']:
+            self.assertTrue(isinstance(key, str))
+
 
 if __name__ == "__main__":
     unittest.main()

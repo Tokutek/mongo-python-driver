@@ -31,13 +31,13 @@ from pymongo.database import Database
 from pymongo.errors import (InvalidOperation,
                             OperationFailure)
 from test import version
-from test.test_connection import get_connection
+from test.test_client import get_client
 
 
 class TestCursor(unittest.TestCase):
 
     def setUp(self):
-        self.db = Database(get_connection(), "pymongo_test")
+        self.db = Database(get_client(), "pymongo_test")
 
     def test_explain(self):
         a = self.db.test.find()
@@ -531,6 +531,16 @@ class TestCursor(unittest.TestCase):
         self.assertTrue(isinstance(cursor2._Cursor__hint, SON))
         self.assertEqual(cursor._Cursor__hint, cursor2._Cursor__hint)
 
+    def test_deepcopy_cursor_littered_with_regexes(self):
+
+        cursor = self.db.test.find({"x": re.compile("^hmmm.*"),
+                                    "y": [re.compile("^hmm.*")],
+                                    "z": {"a": [re.compile("^hm.*")]},
+                                    re.compile("^key.*"): {"a": [re.compile("^hm.*")]}})
+
+        cursor2 = copy.deepcopy(cursor)
+        self.assertEqual(cursor._Cursor__spec, cursor2._Cursor__spec)
+
     def test_add_remove_option(self):
         cursor = self.db.test.find()
         self.assertEqual(0, cursor._Cursor__query_options())
@@ -718,21 +728,21 @@ class TestCursor(unittest.TestCase):
 
         cursor = db.test.find(tailable=True)
 
-        db.test.insert({"x": 1}, safe=True)
+        db.test.insert({"x": 1})
         count = 0
         for doc in cursor:
             count += 1
             self.assertEqual(1, doc["x"])
         self.assertEqual(1, count)
 
-        db.test.insert({"x": 2}, safe=True)
+        db.test.insert({"x": 2})
         count = 0
         for doc in cursor:
             count += 1
             self.assertEqual(2, doc["x"])
         self.assertEqual(1, count)
 
-        db.test.insert({"x": 3}, safe=True)
+        db.test.insert({"x": 3})
         count = 0
         for doc in cursor:
             count += 1
