@@ -22,19 +22,19 @@ import unittest
 
 sys.path[0:0] = [""]
 
-from test.test_connection import get_connection
+from test.test_client import get_client
 
 
 class TestTransactions(unittest.TestCase):
 
     def setUp(self):
-        self.connection = get_connection()
-        self.db = self.connection.pymongo_test
+        self.client = get_client()
+        self.db = self.client.pymongo_test
 
     def tearDown(self):
         self.db.drop_collection("test_large_limit")
         self.db = None
-        self.connection = None
+        self.client = None
 
     def test_cursor_dictionary_too_new(self):
         coll = 'cursor-dictionary-too-new'
@@ -45,7 +45,7 @@ class TestTransactions(unittest.TestCase):
         def other_thread(self, lk):
             lk.acquire()
             try:
-                with self.connection.start_request():
+                with self.client.start_request():
                     self.db[coll].insert({'a':1})
                     self.assertIn(coll, self.db.collection_names())
             finally:
@@ -56,7 +56,7 @@ class TestTransactions(unittest.TestCase):
         lk.acquire()
         t.start()
         try:
-            with self.connection.start_request():
+            with self.client.start_request():
                 try:
                     self.db.command('beginTransaction')
                     lk.release()
