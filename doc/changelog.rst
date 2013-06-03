@@ -1,19 +1,23 @@
 Changelog
 =========
 
-Changes in Version 2.5.2
-------------------------
+Changes in Version 2.5.1+
+-------------------------
 
-Version 2.5.2 fixes a NULL pointer dereference issue when decoding
-an invalid :class:`~bson.dbref.DBRef`.
+Important new features:
 
-Issues Resolved
-...............
+- The `max_pool_size` option for :class:`~pymongo.mongo_client.MongoClient` and
+  :class:`~pymongo.mongo_replica_set_client.MongoReplicaSetClient` now actually
+  caps the number of sockets the pool will open concurrently. Connection or
+  query attempts when the pool has reached `max_pool_size` block waiting for a
+  socket to be returned to the pool. If ``waitQueueTimeoutMS`` is set, an
+  operation that blocks waiting for a socket will raise
+  :exc:`~pymongo.errors.ConnectionFailure` after the timeout. By default
+  ``waitQueueTimeoutMS`` is not set.
 
-See the `PyMongo 2.5.2 release notes in JIRA`_ for the list of resolved issues
-in this release.
-
-.. _PyMongo 2.5.2 release notes in JIRA: https://jira.mongodb.org/browse/PYTHON/fixforversion/12581
+.. warning:: SIGNIFICANT BEHAVIOR CHANGE in 2.5.1+. Previously, `max_pool_size`
+  would limit only the idle sockets the pool would hold onto, not the
+  number of open sockets. The default has also changed, from 10 to 100.
 
 Changes in Version 2.5.1
 ------------------------

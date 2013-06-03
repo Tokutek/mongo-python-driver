@@ -143,7 +143,7 @@ class TestClient(unittest.TestCase, TestRequestMixin):
 
     def test_use_greenlets(self):
         self.assertFalse(MongoClient(host, port).use_greenlets)
-        if thread_util.have_greenlet:
+        if thread_util.have_gevent:
             self.assertTrue(
                 MongoClient(
                     host, port, use_greenlets=True).use_greenlets)
@@ -514,6 +514,16 @@ class TestClient(unittest.TestCase, TestRequestMixin):
         self.assertEqual(1, get_x_timeout(timeout.pymongo_test, None))
         self.assertRaises(ConnectionFailure, get_x_timeout,
                           no_timeout.pymongo_test, 0.1)
+
+    def test_waitQueueTimeoutMS(self):
+        client = MongoClient(host, port, waitQueueTimeoutMS=2000)
+        self.assertEqual(client._MongoClient__pool.wait_queue_timeout, 2)
+
+    def test_waitQueueMultiple(self):
+        client = MongoClient(host, port, max_pool_size=3, waitQueueMultiple=2)
+        pool = client._MongoClient__pool
+        self.assertEqual(pool.wait_queue_multiple, 2)
+        self.assertEqual(pool._socket_semaphore.waiter_semaphore.counter, 6)
 
     def test_tz_aware(self):
         self.assertRaises(ConfigurationError, MongoClient, tz_aware='foo')
