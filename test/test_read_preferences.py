@@ -321,18 +321,20 @@ class TestCommandAndReadPreference(TestReplicaSetClientBase):
             ('name', 'location_geoHaystack'),
         ]), w=self.w)
 
-        self._test_fn(True, lambda: self.c.pymongo_test.command(
-            'geoNear', 'test', near=[0, 0]))
-        self._test_fn(True, lambda: self.c.pymongo_test.command(SON([
-            ('geoNear', 'test'), ('near', [0, 0])])))
+        if False:
+            # geo disabled for TokuMX
+            self._test_fn(True, lambda: self.c.pymongo_test.command(
+                'geoNear', 'test', near=[0, 0]))
+            self._test_fn(True, lambda: self.c.pymongo_test.command(SON([
+                ('geoNear', 'test'), ('near', [0, 0])])))
 
-        self._test_fn(True, lambda: self.c.pymongo_test.command(
-            'geoSearch', 'test', near=[33, 33], maxDistance=6,
-            search={'type': 'restaurant' }, limit=30))
+            self._test_fn(True, lambda: self.c.pymongo_test.command(
+                'geoSearch', 'test', near=[33, 33], maxDistance=6,
+                search={'type': 'restaurant' }, limit=30))
 
-        self._test_fn(True, lambda: self.c.pymongo_test.command(SON([
-            ('geoSearch', 'test'), ('near', [33, 33]), ('maxDistance', 6),
-            ('search', {'type': 'restaurant'}), ('limit', 30)])))
+            self._test_fn(True, lambda: self.c.pymongo_test.command(SON([
+                ('geoSearch', 'test'), ('near', [33, 33]), ('maxDistance', 6),
+                ('search', {'type': 'restaurant'}), ('limit', 30)])))
 
         if version.at_least(self.c, (2, 1, 0)):
             self._test_fn(True, lambda: self.c.pymongo_test.command(SON([
