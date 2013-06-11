@@ -394,6 +394,8 @@ class TestCommandAndReadPreference(TestReplicaSetClientBase):
             {'a': 1}, {}, {}, 'function() { }'))
 
     def test_map_reduce(self):
+        raise SkipTest("map reduce doesn't run on secondaries")
+
         # mapreduce fails if no collection
         self.c.pymongo_test.test.insert({}, w=self.w)
 
@@ -404,6 +406,8 @@ class TestCommandAndReadPreference(TestReplicaSetClientBase):
             'function() { }', 'function() { }', {'inline': 1}))
 
     def test_inline_map_reduce(self):
+        raise SkipTest("map reduce doesn't run on secondaries")
+
         # mapreduce fails if no collection
         self.c.pymongo_test.test.insert({}, w=self.w)
 
