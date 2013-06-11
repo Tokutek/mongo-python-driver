@@ -424,15 +424,12 @@ class TestCollection(unittest.TestCase):
         db.test.drop_indexes()
 
     def test_index_hashed(self):
-        if not version.at_least(self.client, (2, 3, 2)):
-            raise SkipTest("hashed indexing requires server >=2.3.2.")
-
         db = self.db
         db.test.drop_indexes()
         self.assertEqual("a_hashed",
                          db.test.create_index([("a", HASHED)]))
 
-        self.assertEqual("BtreeCursor a_hashed",
+        self.assertEqual("IndexCursor a_hashed",
                 db.test.find({'a': 1}).explain()['cursor'])
         db.test.drop_indexes()
 
