@@ -1564,7 +1564,6 @@ class TestCollection(unittest.TestCase):
         self.db.test.update({"bar": "x"}, {"bar": "x" * (max_size - 15)})
 
     def test_map_reduce(self):
-        raise SkipTest("tokumon crash");
         if not version.at_least(self.db.connection, (1, 1, 1)):
             raise SkipTest("mapReduce command requires MongoDB >= 1.1.1")
 
