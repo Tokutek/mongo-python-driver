@@ -343,6 +343,7 @@ class TestCommandAndReadPreference(TestReplicaSetClientBase):
             ])))
 
     def test_map_reduce_command(self):
+        raise SkipTest("map reduce doesn't run on secondaries")
         # mapreduce fails if no collection
         self.c.pymongo_test.test.insert({}, w=self.w)
 
