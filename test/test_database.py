@@ -253,9 +253,9 @@ class TestDatabase(unittest.TestCase):
         prev_error = db.previous_error()
         self.assertEqual(prev_error["nPrev"], 1)
         del prev_error["nPrev"]
-        prev_error.pop("lastOp", None)
+        prev_error.pop("lastGTID", None)
         error = db.error()
-        error.pop("lastOp", None)
+        error.pop("lastGTID", None)
         # getLastError includes "connectionId" in recent
         # server versions, getPrevError does not.
         error.pop("connectionId", None)
