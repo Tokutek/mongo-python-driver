@@ -35,6 +35,7 @@ from gridfs.errors import (FileExists,
                            NoFile)
 from test.test_client import get_client
 from test.utils import joinall
+from nose.plugins.skip import SkipTest
 
 
 class JustWrite(threading.Thread):
@@ -359,6 +360,7 @@ class TestGridfs(unittest.TestCase):
 
 class TestGridfsReplicaSet(TestReplicaSetClientBase):
     def test_gridfs_replica_set(self):
+        raise SkipTest("skipping due to Tokutek/mongo#77")
         rsc = self._get_client(
             w=self.w, wtimeout=5000,
             read_preference=ReadPreference.SECONDARY)

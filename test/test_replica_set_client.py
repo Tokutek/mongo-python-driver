@@ -766,6 +766,7 @@ class TestReplicaSetClient(TestReplicaSetClientBase, TestRequestMixin):
         self._test_kill_cursor_explicit(ReadPreference.PRIMARY)
 
     def test_kill_cursor_explicit_secondary(self):
+        raise SkipTest("skipping due to Tokutek/mongo#77")
         self._test_kill_cursor_explicit(ReadPreference.SECONDARY)
 
     def test_interrupt_signal(self):
@@ -1027,6 +1028,7 @@ class TestReplicaSetClient(TestReplicaSetClientBase, TestRequestMixin):
         client.close()
 
     def test_pinned_member(self):
+        raise SkipTest("skipping due to Tokutek/mongo#77")
         latency = 1000 * 1000
         client = self._get_client(secondary_acceptable_latency_ms=latency)
 

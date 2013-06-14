@@ -32,6 +32,7 @@ from pymongo.errors import ConfigurationError
 from test.test_replica_set_client import TestReplicaSetClientBase
 from test.test_client import get_client
 from test import version, utils, host, port
+from nose.plugins.skip import SkipTest
 
 
 class TestReadPreferencesBase(TestReplicaSetClientBase):
@@ -143,10 +144,12 @@ class TestReadPreferences(TestReadPreferencesBase):
             read_preference=ReadPreference.PRIMARY_PREFERRED)
 
     def test_secondary(self):
+        raise SkipTest("skipping due to Tokutek/mongo#77")
         self.assertReadsFrom('secondary',
             read_preference=ReadPreference.SECONDARY)
 
     def test_secondary_preferred(self):
+        raise SkipTest("skipping due to Tokutek/mongo#77")
         self.assertReadsFrom('secondary',
             read_preference=ReadPreference.SECONDARY_PREFERRED)
 
@@ -157,6 +160,7 @@ class TestReadPreferences(TestReadPreferencesBase):
             ReadPreference.SECONDARY, ReadPreference.SECONDARY_ONLY)
 
     def test_nearest(self):
+        raise SkipTest("skipping due to Tokutek/mongo#77")
         # With high secondaryAcceptableLatencyMS, expect to read from any
         # member
         c = self._get_client(
