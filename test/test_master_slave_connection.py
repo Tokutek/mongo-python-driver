@@ -40,6 +40,8 @@ from test.utils import TestRequestMixin
 class TestMasterSlaveConnection(unittest.TestCase, TestRequestMixin):
 
     def setUp(self):
+        raise SkipTest("master-slave setups are unsupported in TokuMX")
+
         self.master = MongoClient(host, port)
 
         self.slaves = []
