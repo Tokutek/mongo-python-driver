@@ -199,9 +199,6 @@ class TestClient(unittest.TestCase, TestRequestMixin):
 
     def test_copy_db(self):
         c = MongoClient(host, port)
-        response = c.admin.command('ismaster')
-        if 'setName' in response:
-            raise SkipTest("Connected to a replica set, skipping test_copy_db until the big txn work is done.")
         # We test copy twice; once starting in a request and once not. In
         # either case the copy should succeed (because it starts a request
         # internally) and should leave us in the same state as before the copy.
