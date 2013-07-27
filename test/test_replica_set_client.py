@@ -327,6 +327,8 @@ class TestReplicaSetClient(TestReplicaSetClientBase, TestRequestMixin):
         db.test.insert({'foo': 'x'}, w=self.w, wtimeout=10000)
         self.assertEqual(1, db.test.count())
 
+        # avoid a silly race in tokumx
+        time.sleep(1)
         cursor = db.test.find()
         doc = cursor.next()
         self.assertEqual('x', doc['foo'])
@@ -894,6 +896,8 @@ class TestReplicaSetClient(TestReplicaSetClientBase, TestRequestMixin):
         client.pymongo_test.test.find_one()
         self.assertTrue(primary_pool.in_request())
 
+        # avoid a silly race in tokumx
+        time.sleep(1)
         # Trigger the RSC to actually start a request on secondary pool
         cursor = client.pymongo_test.test.find(
                 read_preference=ReadPreference.SECONDARY)
