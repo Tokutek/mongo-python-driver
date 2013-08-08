@@ -230,13 +230,18 @@ class TestClient(unittest.TestCase, TestRequestMixin):
 
         c.end_request()
         self.assertFalse(c.in_request())
-        c.copy_database("pymongo_test", "pymongo_test2",
-                        "%s:%d" % (host, port))
-        # copy_database() didn't accidentally restart the request
-        self.assertFalse(c.in_request())
 
-        self.assertTrue("pymongo_test2" in c.database_names())
-        self.assertEqual("bar", c.pymongo_test2.test.find_one()["foo"])
+        if not c.is_mongos:
+            # On mongos, this would try to copydb from the mongos itself
+            # to the mongod that's the target.  The mongod would try to
+            # begin a transaction on the mongos, which would fail.
+            c.copy_database("pymongo_test", "pymongo_test2",
+                            "%s:%d" % (host, port))
+            # copy_database() didn't accidentally restart the request
+            self.assertFalse(c.in_request())
+
+            self.assertTrue("pymongo_test2" in c.database_names())
+            self.assertEqual("bar", c.pymongo_test2.test.find_one()["foo"])
 
         if version.at_least(c, (1, 3, 3, 1)):
             c.drop_database("pymongo_test1")
