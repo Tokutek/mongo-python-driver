@@ -305,6 +305,8 @@ class TestDatabase(unittest.TestCase):
         if (is_mongos(self.client) and not
             version.at_least(self.client, (2, 0, 0))):
             raise SkipTest("Auth with sharding requires MongoDB >= 2.0.0")
+        if is_mongos(self.client):
+            raise SkipTest("Auth fails on sharding due to write concern race, see Tokutek/mongo#77")
         db = self.client.pymongo_test
         db.system.users.remove({})
         db.remove_user("mike")
@@ -352,6 +354,8 @@ class TestDatabase(unittest.TestCase):
         if (is_mongos(self.client) and not
             version.at_least(self.client, (2, 0, 0))):
             raise SkipTest("Auth with sharding requires MongoDB >= 2.0.0")
+        if is_mongos(self.client):
+            raise SkipTest("Auth fails on sharding due to write concern race, see Tokutek/mongo#77")
         db = self.client.auth_test
         db.system.users.remove({})
         db.add_user("bernie", "password")
@@ -376,6 +380,8 @@ class TestDatabase(unittest.TestCase):
         if (is_mongos(self.client) and not
             version.at_least(self.client, (2, 0, 0))):
             raise SkipTest("Auth with sharding requires MongoDB >= 2.0.0")
+        if is_mongos(self.client):
+            raise SkipTest("Auth fails on sharding due to write concern race, see Tokutek/mongo#77")
 
         # Database.authenticate() needs to be in a request - check that it
         # always runs in a request, and that it restores the request state
