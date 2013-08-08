@@ -22,6 +22,7 @@ import unittest
 
 sys.path[0:0] = [""]
 
+from nose.plugins.skip import SkipTest
 from test.test_client import get_client
 
 
@@ -37,6 +38,8 @@ class TestTransactions(unittest.TestCase):
         self.client = None
 
     def test_cursor_dictionary_too_new(self):
+        if self.client.is_mongos:
+            raise SkipTest("Can't use transactions through mongos.")
         coll = 'cursor-dictionary-too-new'
         self.db[coll].drop()
 
