@@ -45,11 +45,11 @@ from pymongo.errors import (AutoReconnect,
                             ConfigurationError,
                             ConnectionFailure,
                             InvalidName,
-                            OperationFailure)
+                            OperationFailure, InvalidOperation)
 from test import version, port, pair
 from test.utils import (
     delay, assertReadFrom, assertReadFromAll, read_from_which_host,
-    assertRaisesExactly, TestRequestMixin, one)
+    assertRaisesExactly, TestRequestMixin, one, server_started_with_auth)
 
 
 class TestReplicaSetClientAgainstStandalone(unittest.TestCase):
@@ -123,7 +123,15 @@ class TestReplicaSetClient(TestReplicaSetClientBase, TestRequestMixin):
         self.assertTrue(c.secondaries)
 
         c = self._get_client(_connect=False)
+        c.pymongo_test.test.update({}, {})  # Auto-connect for write.
+        self.assertTrue(c.primary)
+
+        c = self._get_client(_connect=False)
         c.pymongo_test.test.insert({})  # Auto-connect for write.
+        self.assertTrue(c.primary)
+
+        c = self._get_client(_connect=False)
+        c.pymongo_test.test.remove({})  # Auto-connect for write.
         self.assertTrue(c.primary)
 
         c = MongoReplicaSetClient(
@@ -198,7 +206,7 @@ class TestReplicaSetClient(TestReplicaSetClientBase, TestRequestMixin):
         self.assertEqual(c.primary, self.primary)
         self.assertEqual(c.hosts, self.hosts)
         self.assertEqual(c.arbiters, self.arbiters)
-        self.assertEqual(c.max_pool_size, 10)
+        self.assertEqual(c.max_pool_size, 100)
         self.assertEqual(c.document_class, dict)
         self.assertEqual(c.tz_aware, False)
 
@@ -305,6 +313,20 @@ class TestReplicaSetClient(TestReplicaSetClientBase, TestRequestMixin):
             self.assertRaises(AutoReconnect, cursor.next)
         finally:
             socket.socket.sendall = old_sendall
+
+    def test_lazy_auth_raises_operation_failure(self):
+        # Check if we have the prerequisites to run this test.
+        c = self._get_client()
+        if not server_started_with_auth(c):
+            raise SkipTest('Authentication is not enabled on server')
+
+        lazy_client = MongoReplicaSetClient(
+            "mongodb://user:wrong@%s/pymongo_test" % pair,
+            replicaSet=self.name,
+            _connect=False)
+
+        assertRaisesExactly(
+            OperationFailure, lazy_client.test.collection.find_one)
 
     def test_operations(self):
         c = self._get_client()
@@ -441,6 +463,32 @@ class TestReplicaSetClient(TestReplicaSetClientBase, TestRequestMixin):
             self.assertEqual("bar", c.pymongo_test1.test.find_one()["foo"])
         c.close()
 
+    def test_get_default_database(self):
+        host = one(self.hosts)
+        uri = "mongodb://%s:%d/foo?replicaSet=%s" % (
+            host[0], host[1], self.name)
+
+        c = MongoReplicaSetClient(uri, _connect=False)
+        self.assertEqual(Database(c, 'foo'), c.get_default_database())
+
+    def test_get_default_database_error(self):
+        host = one(self.hosts)
+        # URI with no database.
+        uri = "mongodb://%s:%d/?replicaSet=%s" % (
+            host[0], host[1], self.name)
+
+        c = MongoReplicaSetClient(uri, _connect=False)
+        self.assertRaises(ConfigurationError, c.get_default_database)
+
+    def test_get_default_database_with_authsource(self):
+        # Ensure we distinguish database name from authSource.
+        host = one(self.hosts)
+        uri = "mongodb://%s:%d/foo?replicaSet=%s&authSource=src" % (
+            host[0], host[1], self.name)
+
+        c = MongoReplicaSetClient(uri, _connect=False)
+        self.assertEqual(Database(c, 'foo'), c.get_default_database())
+
     def test_iteration(self):
         client = self._get_client()
 
@@ -478,7 +526,6 @@ class TestReplicaSetClient(TestReplicaSetClientBase, TestRequestMixin):
 
         # Failure occurs if the client is used before the fork
         db.test.find_one()
-        #db.connection.end_request()
 
         def loop(pipe):
             while True:
@@ -520,6 +567,46 @@ class TestReplicaSetClient(TestReplicaSetClientBase, TestRequestMixin):
             pass
         try:
             cp2.recv()
+            self.fail()
+        except EOFError:
+            pass
+
+        db.connection.close()
+
+    def test_fork_and_schedule_refresh(self):
+        # After a fork the monitor thread is gone.
+        # Verify that schedule_refresh throws InvalidOperation.
+        if sys.platform == "win32":
+            raise SkipTest("Can't fork on Windows")
+
+        try:
+            from multiprocessing import Process, Pipe
+        except ImportError:
+            raise SkipTest("No multiprocessing module")
+
+        client = self._get_client()
+        db = client.pymongo_test
+
+        def f(pipe):
+            try:
+                # Trigger a refresh.
+                self.assertRaises(InvalidOperation, client.disconnect)
+            except:
+                traceback.print_exc()
+                pipe.send(True)
+                os._exit(1)
+
+        cp, cc = Pipe()
+        p = Process(target=f, args=(cc,))
+        p.start()
+        p.join(10)
+        p.terminate()
+        p.join()
+        cc.close()
+
+        # recv will only have data if the subprocess failed
+        try:
+            cp.recv()
             self.fail()
         except EOFError:
             pass

@@ -62,8 +62,8 @@ MongoEngine
   layer on top of PyMongo. It allows you to define schemas for
   documents and query collections using syntax inspired by the Django
   ORM. The code is available on `github
-  <http://github.com/hmarr/mongoengine>`_; for more information, see
-  the `tutorial <http://mongoengine.org/docs/v0.5/tutorial.html>`_.
+  <http://github.com/mongoengine/mongoengine>`_; for more information, see
+  the `tutorial <http://docs.mongoengine.org/en/latest/tutorial.html>`_.
 
 Minimongo
   `minimongo <http://pypi.python.org/pypi/minimongo>`_ is a lightweight,
@@ -85,11 +85,17 @@ This section lists tools and adapters that have been designed to work with
 various Python frameworks and libraries.
 
 * `Django MongoDB Engine
-  <http://django-mongodb.org/>`_ is a MongoDB
+  <http://django-mongodb-engine.readthedocs.org/en/latest/>`_ is a MongoDB
   database backend for Django that completely integrates with its ORM.
-  For more information `see the tutorial <http://django-mongodb.org/tutorial.html>`_.
+  For more information `see the tutorial
+  <http://django-mongodb-engine.readthedocs.org/en/latest/tutorial.html>`_.
 * `mango <http://github.com/vpulim/mango>`_ provides MongoDB backends for
   Django sessions and authentication (bypassing :mod:`django.db` entirely).
+* `Django MongoEngine
+  <https://github.com/MongoEngine/django-mongoengine>`_ is a MongoDB backend for
+  Django, an `example:
+  <https://github.com/MongoEngine/django-mongoengine/tree/master/example/tumblelog>`_.
+  For more information `<http://docs.mongoengine.org/en/latest/django.html>`_
 * `mongodb_beaker <http://pypi.python.org/pypi/mongodb_beaker>`_ is a
   project to enable using MongoDB as a backend for `beaker's
   <http://beaker.groovie.org/>`_ caching / session system.

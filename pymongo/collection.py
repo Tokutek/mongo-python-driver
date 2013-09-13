@@ -341,6 +341,11 @@ class Collection(common.BaseObject):
 
         .. mongodoc:: insert
         """
+        # Batch inserts require us to know the connected master's
+        # max_bson_size and max_message_size. We have to be connected
+        # to a master to know that.
+        self.database.connection._ensure_connected(True)
+
         docs = doc_or_docs
         return_one = False
         if isinstance(docs, dict):
@@ -351,13 +356,16 @@ class Collection(common.BaseObject):
             docs = [self.__database._fix_incoming(doc, self) for doc in docs]
 
         safe, options = self._get_write_mode(safe, **kwargs)
-        self.__database.connection._send_message(
-            message.insert(self.__full_name, docs,
-                           check_keys, safe, options,
-                           continue_on_error, self.__uuid_subtype), safe)
+        message._do_batched_insert(self.__full_name, docs,
+                                   check_keys, safe, options,
+                                   continue_on_error, self.__uuid_subtype,
+                                   self.database.connection)
 
         ids = [doc.get("_id", None) for doc in docs]
-        return return_one and ids[0] or ids
+        if return_one:
+            return ids[0]
+        else:
+            return ids
 
     def update(self, spec, document, upsert=False, manipulate=False,
                safe=None, multi=False, check_keys=True, **kwargs):
@@ -676,6 +684,32 @@ class Collection(common.BaseObject):
             the nearest member may accept reads. Default 15 milliseconds.
             **Ignored by mongos** and must be configured on the command line.
             See the localThreshold_ option for more information.
+          - `exhaust` (optional): If ``True`` create an "exhaust" cursor.
+            MongoDB will stream batched results to the client without waiting
+            for the client to request each batch, reducing latency.
+
+        .. note:: There are a number of caveats to using the `exhaust`
+           parameter:
+
+            1. The `exhaust` and `limit` options are incompatible and can
+            not be used together.
+
+            2. The `exhaust` option is not supported by mongos and can not be
+            used with a sharded cluster.
+
+            3. A :class:`~pymongo.cursor.Cursor` instance created with the
+            `exhaust` option requires an exclusive :class:`~socket.socket`
+            connection to MongoDB. If the :class:`~pymongo.cursor.Cursor` is
+            discarded without being completely iterated the underlying
+            :class:`~socket.socket` connection will be closed and discarded
+            without being returned to the connection pool.
+
+            4. A :class:`~pymongo.cursor.Cursor` instance created with the
+            `exhaust` option in a :doc:`request </examples/requests>` **must**
+            be completely iterated before executing any other operation.
+
+            5. The `network_timeout` option is ignored when using the
+            `exhaust` option.
 
         .. note:: The `manipulate` parameter may default to False in
            a future release.
@@ -753,6 +787,8 @@ class Collection(common.BaseObject):
           - `dropDups` or `drop_dups`: should we drop duplicates
           - `background`: if this index should be created in the
             background
+          - `sparse`: if True, omit from the index any documents that lack
+            the indexed field
           - `bucketSize` or `bucket_size`: for use with geoHaystack indexes.
             Number of documents to group together within a certain proximity
             to a given longitude and latitude.
@@ -801,6 +837,10 @@ class Collection(common.BaseObject):
             cache_for = kwargs.pop('ttl')
             warnings.warn("ttl is deprecated. Please use cache_for instead.",
                           DeprecationWarning, stacklevel=2)
+
+        # The types supported by datetime.timedelta. 2to3 removes long.
+        if not isinstance(cache_for, (int, long, float)):
+            raise TypeError("cache_for must be an integer or float.")
 
         keys = helpers._index_list(key_or_list)
         index_doc = helpers._index_document(keys)
@@ -865,6 +905,8 @@ class Collection(common.BaseObject):
             during index creation when creating a unique index?
           - `background`: if this index should be created in the
             background
+          - `sparse`: if True, omit from the index any documents that lack
+            the indexed field
           - `bucketSize` or `bucket_size`: for use with geoHaystack indexes.
             Number of documents to group together within a certain proximity
             to a given longitude and latitude.
@@ -1022,7 +1064,7 @@ class Collection(common.BaseObject):
 
         return options
 
-    def aggregate(self, pipeline):
+    def aggregate(self, pipeline, **kwargs):
         """Perform an aggregation using the aggregation framework on this
         collection.
 
@@ -1035,9 +1077,21 @@ class Collection(common.BaseObject):
 
         :Parameters:
           - `pipeline`: a single command or list of aggregation commands
+          - `**kwargs`: send arbitrary parameters to the aggregate command
 
-        .. note:: Requires server version **>= 2.1.0**
+        .. note:: Requires server version **>= 2.1.0**.
 
+        With server version **>= 2.5.1**, pass
+        ``cursor={}`` to retrieve unlimited aggregation results
+        with a :class:`~pymongo.cursor.Cursor`::
+
+            pipeline = [{'$project': {'name': {'$toUpper': '$name'}}}]
+            cursor = collection.aggregate(pipeline, cursor={})
+            for doc in cursor:
+                print doc
+
+        .. versionchanged:: 2.6
+           Added cursor support.
         .. versionadded:: 2.3
 
         .. _aggregate command:
@@ -1051,14 +1105,27 @@ class Collection(common.BaseObject):
 
         use_master = not self.slave_okay and not self.read_preference
 
-        return self.__database.command("aggregate", self.__name,
-                                        pipeline=pipeline,
-                                        read_preference=self.read_preference,
-                                        tag_sets=self.tag_sets,
-                                        secondary_acceptable_latency_ms=(
-                                         self.secondary_acceptable_latency_ms),
-                                        slave_okay=self.slave_okay,
-                                        _use_master=use_master)
+        command_kwargs = {
+            'pipeline': pipeline,
+            'read_preference': self.read_preference,
+            'tag_sets': self.tag_sets,
+            'secondary_acceptable_latency_ms': (
+                self.secondary_acceptable_latency_ms),
+            'slave_okay': self.slave_okay,
+            '_use_master': use_master}
+
+        command_kwargs.update(kwargs)
+        command_response = self.__database.command(
+            "aggregate", self.__name, **command_kwargs)
+
+        if 'cursor' in command_response:
+            cursor_info = command_response['cursor']
+            return Cursor(
+                self,
+                _first_batch=cursor_info['firstBatch'],
+                _cursor_id=cursor_info['id'])
+        else:
+            return command_response
 
     # TODO key and condition ought to be optional, but deprecation
     # could be painful as argument order would have to change.

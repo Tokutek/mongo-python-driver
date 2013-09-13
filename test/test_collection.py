@@ -36,7 +36,9 @@ from bson.py3compat import b
 from bson.son import SON
 from pymongo import (ASCENDING, DESCENDING, GEO2D,
                      GEOHAYSTACK, GEOSPHERE, HASHED)
+from pymongo import message as message_module
 from pymongo.collection import Collection
+from pymongo.cursor import Cursor
 from pymongo.son_manipulator import SONManipulator
 from pymongo.errors import (ConfigurationError,
                             DuplicateKeyError,
@@ -46,7 +48,7 @@ from pymongo.errors import (ConfigurationError,
                             OperationFailure,
                             TimeoutError)
 from test.test_client import get_client
-from test.utils import is_mongos, joinall
+from test.utils import is_mongos, joinall, enable_text_search
 from test import (qcheck,
                   version)
 
@@ -103,6 +105,10 @@ class TestCollection(unittest.TestCase):
 
         self.assertRaises(TypeError, db.test.create_index, 5)
         self.assertRaises(TypeError, db.test.create_index, {"hello": 1})
+        self.assertRaises(TypeError,
+                          db.test.ensure_index, {"hello": 1}, cache_for='foo')
+        self.assertRaises(TypeError,
+                          db.test.ensure_index, {"hello": 1}, ttl='foo')
         self.assertRaises(ValueError, db.test.create_index, [])
 
         db.test.drop_indexes()
@@ -148,6 +154,10 @@ class TestCollection(unittest.TestCase):
         db = self.db
 
         self.assertRaises(TypeError, db.test.ensure_index, {"hello": 1})
+        self.assertRaises(TypeError,
+                          db.test.ensure_index, {"hello": 1}, cache_for='foo')
+        self.assertRaises(TypeError,
+                          db.test.ensure_index, {"hello": 1}, ttl='foo')
 
         db.test.drop_indexes()
         self.assertEqual("hello_1", db.test.create_index("hello"))
@@ -392,8 +402,7 @@ class TestCollection(unittest.TestCase):
         if is_mongos(self.client):
             raise SkipTest("setParameter does not work through mongos")
 
-        self.client.admin.command('setParameter', '*',
-                                  textSearchEnabled=True)
+        enable_text_search(self.client)
 
         db = self.db
         db.test.drop_indexes()
@@ -401,9 +410,6 @@ class TestCollection(unittest.TestCase):
         index_info = db.test.index_information()["t_text"]
         self.assertTrue("weights" in index_info)
         db.test.drop_indexes()
-
-        self.client.admin.command('setParameter', '*',
-                                  textSearchEnabled=False)
 
     def test_index_2dsphere(self):
         if not version.at_least(self.client, (2, 3, 2)):
@@ -821,6 +827,43 @@ class TestCollection(unittest.TestCase):
                                             itertools.repeat(None, 10)))
         self.assertEqual(db.test.find().count(), 10)
 
+    def test_insert_manipulate_false(self):
+        # Test three aspects of insert with manipulate=False:
+        #   1. The return value is None or [None] as appropriate.
+        #   2. _id is not set on the passed-in document object.
+        #   3. _id is not sent to server.
+        if not version.at_least(self.db.connection, (2, 0)):
+            raise SkipTest('Need at least MongoDB 2.0')
+
+        collection_name = 'test_insert_manipulate_false'
+        try:
+            self.db.drop_collection(collection_name)
+
+            # A capped collection, so server doesn't set _id automatically.
+            collection = self.db.create_collection(
+                collection_name, capped=True, autoIndexId=False,
+                size=1000)
+
+            oid = ObjectId()
+            doc = {'a': oid}
+
+            # The return value is None.
+            self.assertTrue(collection.insert(doc, manipulate=False) is None)
+
+            # insert() shouldn't set _id on the passed-in document object.
+            self.assertEqual({'a': oid}, doc)
+
+            # _id is not sent to server.
+            self.assertEqual(doc, collection.find_one())
+
+            # Bulk insert. The return value is a list of None.
+            self.assertEqual([None], collection.insert([{}], manipulate=False))
+
+            ids = collection.insert([{}, {}], manipulate=False)
+            self.assertEqual([None, None], ids)
+        finally:
+            self.db.drop_collection(collection_name)
+
     def test_save(self):
         self.db.drop_collection("test")
 
@@ -963,7 +1006,8 @@ class TestCollection(unittest.TestCase):
             self.fail()
         except OperationFailure, e:
             if version.at_least(self.db.connection, (1, 3)):
-                self.assertEqual(10147, e.code)
+                if e.code not in (10147, 17009):
+                    self.fail()
 
     def test_index_on_subfield(self):
         db = self.db
@@ -1164,12 +1208,6 @@ class TestCollection(unittest.TestCase):
 
     def test_manual_last_error(self):
         self.db.test.save({"x": 1}, w=0)
-        # XXX: Fix this if we ever have a replica set unittest env.
-        # mongo >=1.7.6 errors with 'norepl' when w=2+
-        # and we aren't replicated
-        if not version.at_least(self.client, (1, 7, 6)):
-            self.assertRaises(TimeoutError, self.db.command,
-                              "getlasterror", w=2, wtimeout=1)
         self.db.command("getlasterror", w=1, wtimeout=1)
 
     def test_count(self):
@@ -1199,6 +1237,36 @@ class TestCollection(unittest.TestCase):
         self.assertEqual(expected, db.test.aggregate(pipeline))
         self.assertEqual(expected, db.test.aggregate([pipeline]))
         self.assertEqual(expected, db.test.aggregate((pipeline,)))
+
+    def test_aggregation_cursor_validation(self):
+        if not version.at_least(self.db.connection, (2, 5, 1)):
+            raise SkipTest("Aggregation cursor requires MongoDB >= 2.5.1")
+        db = self.db
+        projection = {'$project': {'_id': '$_id'}}
+        cursor = db.test.aggregate(projection, cursor={})
+        self.assertTrue(isinstance(cursor, Cursor))
+        self.assertRaises(InvalidOperation, cursor.rewind)
+        self.assertRaises(InvalidOperation, cursor.clone)
+        self.assertRaises(InvalidOperation, cursor.count)
+        self.assertRaises(InvalidOperation, cursor.explain)
+
+    def test_aggregation_cursor(self):
+        if not version.at_least(self.db.connection, (2, 5, 1)):
+            raise SkipTest("Aggregation cursor requires MongoDB >= 2.5.1")
+        db = self.db
+
+        # A small collection which returns only an initial batch,
+        # and a larger one that requires a getMore.
+        for collection_size in (10, 1000):
+            db.drop_collection("test")
+            db.test.insert([{'_id': i} for i in range(collection_size)])
+            expected_sum = sum(range(collection_size))
+            cursor = db.test.aggregate(
+                {'$project': {'_id': '$_id'}}, cursor={})
+
+            self.assertEqual(
+                expected_sum,
+                sum(doc['_id'] for doc in cursor))
 
     def test_group(self):
         db = self.db
@@ -1487,6 +1555,58 @@ class TestCollection(unittest.TestCase):
         list(self.db.test.find(timeout=False))
         list(self.db.test.find(timeout=True))
 
+    def test_exhaust(self):
+        if is_mongos(self.db.connection):
+            self.assertRaises(InvalidOperation,
+                              self.db.test.find, exhaust=True)
+            return
+
+        self.assertRaises(TypeError, self.db.test.find, exhaust=5)
+        # Limit is incompatible with exhaust.
+        self.assertRaises(InvalidOperation,
+                          self.db.test.find, exhaust=True, limit=5)
+        cur = self.db.test.find(exhaust=True)
+        self.assertRaises(InvalidOperation, cur.limit, 5)
+        cur = self.db.test.find(limit=5)
+        self.assertRaises(InvalidOperation, cur.add_option, 64)
+        cur = self.db.test.find()
+        cur.add_option(64)
+        self.assertRaises(InvalidOperation, cur.limit, 5)
+
+        self.db.drop_collection("test")
+        # Insert enough documents to require more than one batch
+        self.db.test.insert([{'i': i} for i in xrange(150)])
+
+        client = get_client(max_pool_size=1)
+        socks = client._MongoClient__pool.sockets
+        self.assertEqual(1, len(socks))
+
+        # Make sure the socket is returned after exhaustion.
+        cur = client[self.db.name].test.find(exhaust=True)
+        cur.next()
+        self.assertEqual(0, len(socks))
+        for doc in cur:
+            pass
+        self.assertEqual(1, len(socks))
+
+        # Same as previous but don't call next()
+        for doc in client[self.db.name].test.find(exhaust=True):
+            pass
+        self.assertEqual(1, len(socks))
+
+        # If the Cursor intance is discarded before being
+        # completely interated we have to close and
+        # discard the socket.
+        cur = client[self.db.name].test.find(exhaust=True)
+        cur.next()
+        self.assertEqual(0, len(socks))
+        if sys.platform.startswith('java') or 'PyPy' in sys.version:
+            # Don't wait for GC or use gc.collect(), it's unreliable.
+            cur.close()
+        cur = None
+        # The socket should be discarded.
+        self.assertEqual(0, len(socks))
+
     def test_distinct(self):
         if not version.at_least(self.db.connection, (1, 1)):
             raise SkipTest("distinct command requires MongoDB >= 1.1")
@@ -1562,6 +1682,85 @@ class TestCollection(unittest.TestCase):
         self.assertRaises(InvalidDocument, self.db.test.update,
                           {"bar": "x"}, {"bar": "x" * (max_size - 14)})
         self.db.test.update({"bar": "x"}, {"bar": "x" * (max_size - 15)})
+
+    def test_insert_large_batch(self):
+        max_bson_size = self.db.connection.max_bson_size
+        big_string = 'x' * (max_bson_size - 100)
+        self.db.test.drop()
+        self.assertEqual(0, self.db.test.count())
+
+        # Batch insert that requires 2 batches
+        batch = [{'x': big_string}, {'x': big_string},
+                 {'x': big_string}, {'x': big_string}]
+        self.assertTrue(self.db.test.insert(batch, w=1))
+        self.assertEqual(4, self.db.test.count())
+
+        batch[1]['_id'] = batch[0]['_id']
+
+        # Test that inserts fail after first error, acknowledged.
+        self.db.test.drop()
+        self.assertRaises(DuplicateKeyError, self.db.test.insert, batch, w=1)
+        self.assertEqual(1, self.db.test.count())
+
+        # Test that inserts fail after first error, unacknowledged.
+        self.db.test.drop()
+        self.assertTrue(self.db.test.insert(batch, w=0))
+        self.assertEqual(1, self.db.test.count())
+
+        # 2 batches, 2 errors, acknowledged, continue on error
+        self.db.test.drop()
+        batch[3]['_id'] = batch[2]['_id']
+        try:
+            self.db.test.insert(batch, continue_on_error=True, w=1)
+        except OperationFailure, e:
+            # Make sure we report the last error, not the first.
+            self.assertTrue(str(batch[2]['_id']) in str(e))
+        else:
+            self.fail('OpreationFailure not raised.')
+        # Only the first and third documents should be inserted.
+        self.assertEqual(2, self.db.test.count())
+
+        # 2 batches, 2 errors, unacknowledged, continue on error
+        self.db.test.drop()
+        self.assertTrue(self.db.test.insert(batch, continue_on_error=True, w=0))
+        # Only the first and third documents should be inserted.
+        self.assertEqual(2, self.db.test.count())
+
+    # Starting in PyMongo 2.6 we no longer use message.insert for inserts, but
+    # message.insert is part of the public API. Do minimal testing here; there
+    # isn't really a better place.
+    def test_insert_message_creation(self):
+        send = self.db.connection._send_message
+        name = "%s.%s" % (self.db.name, "test")
+
+        def do_insert(args):
+            send(message_module.insert(*args), args[3])
+
+        self.db.drop_collection("test")
+        self.db.test.insert({'_id': 0}, w=1)
+        self.assertTrue(1, self.db.test.count())
+
+        simple_args = (name, [{'_id': 0}], True, False, {}, False, 3)
+        gle_args = (name, [{'_id': 0}], True, True, {'w': 1}, False, 3)
+        coe_args = (name, [{'_id': 0}, {'_id': 1}],
+                    True, True, {'w': 1}, True, 3)
+
+        self.assertEqual(None, do_insert(simple_args))
+        self.assertTrue(1, self.db.test.count())
+        self.assertRaises(DuplicateKeyError, do_insert, gle_args)
+        self.assertTrue(1, self.db.test.count())
+        self.assertRaises(DuplicateKeyError, do_insert, coe_args)
+        self.assertTrue(2, self.db.test.count())
+
+        if have_uuid:
+            doc = {'_id': 2, 'uuid': uuid.uuid4()}
+            uuid_sub_args = (name, [doc],
+                             True, True, {'w': 1}, True, 6)
+            do_insert(uuid_sub_args)
+            coll = self.db.test
+            self.assertNotEqual(doc, coll.find_one({'_id': 2}))
+            coll.uuid_subtype = 6
+            self.assertEqual(doc, coll.find_one({'_id': 2}))
 
     def test_map_reduce(self):
         if not version.at_least(self.db.connection, (1, 1, 1)):
@@ -1696,14 +1895,19 @@ class TestCollection(unittest.TestCase):
         ref_only = {'ref': {'$ref': 'collection'}}
         id_only = {'ref': {'$id': ObjectId()}}
 
-        # Force insert of ref without $id.
-        c.insert(ref_only, check_keys=False)
-        self.assertEqual(DBRef('collection', id=None), c.find_one()['ref'])
-        c.drop()
+        # Starting with MongoDB 2.5.2 this is no longer possible
+        # from insert, update, or findAndModify.
+        if not version.at_least(self.db.connection, (2, 5, 2)):
+            # Force insert of ref without $id.
+            c.insert(ref_only, check_keys=False)
+            self.assertEqual(DBRef('collection', id=None),
+                             c.find_one()['ref'])
 
-        # DBRef without $ref is decoded as normal subdocument.
-        c.insert(id_only, check_keys=False)
-        self.assertEqual(id_only, c.find_one())
+            c.drop()
+
+            # DBRef without $ref is decoded as normal subdocument.
+            c.insert(id_only, check_keys=False)
+            self.assertEqual(id_only, c.find_one())
 
     def test_as_class(self):
         c = self.db.test
@@ -1731,11 +1935,14 @@ class TestCollection(unittest.TestCase):
         c.insert({'_id': 1, 'i': 1})
 
         # Test that we raise DuplicateKeyError when appropriate.
-        c.ensure_index('i', unique=True)
-        self.assertRaises(DuplicateKeyError,
-                          c.find_and_modify, query={'i': 1, 'j': 1},
-                          update={'$set': {'k': 1}}, upsert=True)
-        c.drop_indexes()
+        # MongoDB doesn't have a code field for DuplicateKeyError
+        # from commands before 2.2.
+        if version.at_least(self.db.connection, (2, 2)):
+            c.ensure_index('i', unique=True)
+            self.assertRaises(DuplicateKeyError,
+                              c.find_and_modify, query={'i': 1, 'j': 1},
+                              update={'$set': {'k': 1}}, upsert=True)
+            c.drop_indexes()
 
         # Test correct findAndModify
         self.assertEqual({'_id': 1, 'i': 1},
@@ -1771,20 +1978,23 @@ class TestCollection(unittest.TestCase):
                          c.find_and_modify({'_id': 1}, {'$inc': {'i': 1}},
                                            new=True, fields={'i': 1}))
 
-        # Test with full_response=True (version > 2.4.2)
-        result = c.find_and_modify({'_id': 1}, {'$inc': {'i': 1}},
-                                           new=True, upsert=True, 
-                                           full_response=True,
-                                           fields={'i': 1})
-        self.assertEqual({'_id': 1, 'i': 5}, result["value"])
-        self.assertEqual(True, result["lastErrorObject"]["updatedExisting"])
-        
-        result = c.find_and_modify({'_id': 2}, {'$inc': {'i': 1}},
-                                           new=True, upsert=True, 
-                                           full_response=True,
-                                           fields={'i': 1})
-        self.assertEqual({'_id': 2, 'i': 1}, result["value"])
-        self.assertEqual(False, result["lastErrorObject"]["updatedExisting"])
+        # Test with full_response=True
+        # No lastErrorObject from mongos until 2.0
+        if (not is_mongos(self.db.connection) or
+            version.at_least(self.db.connection, (2, 0))):
+            result = c.find_and_modify({'_id': 1}, {'$inc': {'i': 1}},
+                                               new=True, upsert=True,
+                                               full_response=True,
+                                               fields={'i': 1})
+            self.assertEqual({'_id': 1, 'i': 5}, result["value"])
+            self.assertEqual(True, result["lastErrorObject"]["updatedExisting"])
+
+            result = c.find_and_modify({'_id': 2}, {'$inc': {'i': 1}},
+                                               new=True, upsert=True,
+                                               full_response=True,
+                                               fields={'i': 1})
+            self.assertEqual({'_id': 2, 'i': 1}, result["value"])
+            self.assertEqual(False, result["lastErrorObject"]["updatedExisting"])
 
         class ExtendedDict(dict):
             pass

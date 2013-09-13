@@ -231,7 +231,7 @@ class MongoClient(common.BaseObject):
         seeds = set()
         username = None
         password = None
-        db_name = None
+        self.__default_database_name = None
         opts = {}
         for entity in host:
             if "://" in entity:
@@ -240,7 +240,9 @@ class MongoClient(common.BaseObject):
                     seeds.update(res["nodelist"])
                     username = res["username"] or username
                     password = res["password"] or password
-                    db_name = res["database"] or db_name
+                    self.__default_database_name = (
+                        res["database"] or self.__default_database_name)
+
                     opts = res["options"]
                 else:
                     idx = entity.find("://")
@@ -267,8 +269,8 @@ class MongoClient(common.BaseObject):
             options[option] = value
         options.update(opts)
 
-        self.__max_pool_size = common.validate_positive_integer(
-                                                'max_pool_size', max_pool_size)
+        self.__max_pool_size = common.validate_positive_integer_or_none(
+            'max_pool_size', max_pool_size)
 
         self.__cursor_manager = CursorManager(self)
 
@@ -298,10 +300,10 @@ class MongoClient(common.BaseObject):
                                      % ', '.join(ssl_kwarg_keys))
 
         if self.__ssl_cert_reqs and not self.__ssl_ca_certs:
-                raise ConfigurationError("If `ssl_cert_reqs` is not "
-                                         "`ssl.CERT_NONE` then you must "
-                                         "include `ssl_ca_certs` to be able "
-                                         "to validate the server.")
+            raise ConfigurationError("If `ssl_cert_reqs` is not "
+                                     "`ssl.CERT_NONE` then you must "
+                                     "include `ssl_ca_certs` to be able "
+                                     "to validate the server.")
 
         if ssl_kwarg_keys and self.__use_ssl is None:
             # ssl options imply ssl = True
@@ -349,19 +351,18 @@ class MongoClient(common.BaseObject):
                 # ConnectionFailure makes more sense here than AutoReconnect
                 raise ConnectionFailure(str(e))
 
-        db_name = options.get('authsource', db_name)
-        if db_name and username is None:
-            warnings.warn("database name or authSource in URI is being "
-                          "ignored. If you wish to authenticate to %s, you "
-                          "must provide a username and password." % (db_name,))
         if username:
             mechanism = options.get('authmechanism', 'MONGODB-CR')
-            if mechanism == 'GSSAPI':
-                source = '$external'
-            else:
-                source = db_name or 'admin'
-            credentials = (source, unicode(username),
-                           unicode(password), mechanism)
+            source = (
+                options.get('authsource')
+                or self.__default_database_name
+                or 'admin')
+
+            credentials = auth._build_credentials_tuple(mechanism,
+                                                        source,
+                                                        unicode(username),
+                                                        unicode(password),
+                                                        options)
             try:
                 self._cache_credentials(source, credentials, _connect)
             except OperationFailure, exc:
@@ -460,7 +461,7 @@ class MongoClient(common.BaseObject):
 
             # Logout any credentials that no longer exist in the cache.
             for credentials in authset - cached:
-                self.__simple_command(sock_info, credentials[0], {'logout': 1})
+                self.__simple_command(sock_info, credentials[1], {'logout': 1})
                 sock_info.authset.discard(credentials)
 
             for credentials in cached - authset:
@@ -512,12 +513,12 @@ class MongoClient(common.BaseObject):
         a blocked operation will raise :exc:`~pymongo.errors.ConnectionFailure`
         after a timeout. By default ``waitQueueTimeoutMS`` is not set.
 
-        .. warning:: SIGNIFICANT BEHAVIOR CHANGE in 2.5.1+. Previously, this
+        .. warning:: SIGNIFICANT BEHAVIOR CHANGE in 2.6. Previously, this
           parameter would limit only the idle sockets the pool would hold
           onto, not the number of open sockets. The default has also changed
           to 100.
 
-        .. versionchanged:: 2.5.1+
+        .. versionchanged:: 2.6
         .. versionadded:: 1.11
         """
         return self.__max_pool_size
@@ -579,6 +580,15 @@ class MongoClient(common.BaseObject):
         """
         return self.__max_bson_size
 
+    @property
+    def max_message_size(self):
+        """Return the maximum message size the connected server
+        accepts in bytes.
+
+        .. versionadded:: 2.6
+        """
+        return self.__max_message_size
+
     def __simple_command(self, sock_info, dbname, spec):
         """Send a command to the server.
         """
@@ -621,6 +631,10 @@ class MongoClient(common.BaseObject):
 
         if "maxBsonObjectSize" in response:
             self.__max_bson_size = response["maxBsonObjectSize"]
+        if "maxMessageSizeBytes" in response:
+            self.__max_message_size = response["maxMessageSizeBytes"]
+        else:
+            self.__max_message_size = 2 * self.max_bson_size
 
         # Replica Set?
         if not self.__direct:
@@ -711,6 +725,9 @@ class MongoClient(common.BaseObject):
                     raise ConfigurationError("Seed list cannot contain a mix "
                                              "of mongod and mongos instances.")
                 return node
+            except OperationFailure:
+                # The server is available but something failed, probably auth.
+                raise
             except Exception, why:
                 errors.append(str(why))
 
@@ -760,6 +777,13 @@ class MongoClient(common.BaseObject):
             self.__pool.maybe_return_socket(sock_info)
             raise
         return sock_info
+
+    def _ensure_connected(self, dummy):
+        """Ensure this client instance is connected to a mongod/s.
+        """
+        host, port = (self.__host, self.__port)
+        if host is None or (port is None and '/' not in host):
+            self.__find_node()
 
     def disconnect(self):
         """Disconnect from MongoDB.
@@ -971,16 +995,18 @@ class MongoClient(common.BaseObject):
             message += chunk
         return message
 
-    def __receive_message_on_socket(self, operation, request_id, sock_info):
-        """Receive a message in response to `request_id` on `sock`.
+    def __receive_message_on_socket(self, operation, rqst_id, sock_info):
+        """Receive a message in response to `rqst_id` on `sock`.
 
         Returns the response data with the header removed.
         """
         header = self.__receive_data_on_socket(16, sock_info)
         length = struct.unpack("<i", header[:4])[0]
-        msg_req_id = struct.unpack("<i", header[8:12])[0]
-        assert request_id == msg_req_id, \
-            "ids don't match %r %r" % (request_id, msg_req_id)
+        # No rqst_id for exhaust cursor "getMore".
+        if rqst_id is not None:
+            resp_id = struct.unpack("<i", header[8:12])[0]
+            assert rqst_id == resp_id, "ids don't match %r %r" % (rqst_id,
+                                                                  resp_id)
         assert operation == struct.unpack("<i", header[12:])[0]
 
         return self.__receive_data_on_socket(length - 16, sock_info)
@@ -1008,27 +1034,29 @@ class MongoClient(common.BaseObject):
           - `message`: (request_id, data) pair making up the message to send
         """
         sock_info = self.__socket()
-
+        exhaust = kwargs.get('exhaust')
         try:
             try:
-                if "network_timeout" in kwargs:
+                if not exhaust and "network_timeout" in kwargs:
                     sock_info.sock.settimeout(kwargs["network_timeout"])
-                return self.__send_and_receive(message, sock_info)
+                response = self.__send_and_receive(message, sock_info)
+
+                if not exhaust:
+                    if "network_timeout" in kwargs:
+                        sock_info.sock.settimeout(self.__net_timeout)
+
+                return (None, (response, sock_info, self.__pool))
             except (ConnectionFailure, socket.error), e:
                 self.disconnect()
                 raise AutoReconnect(str(e))
         finally:
-            if "network_timeout" in kwargs:
-                try:
-                    # Restore the socket's original timeout and return it to
-                    # the pool
-                    sock_info.sock.settimeout(self.__net_timeout)
-                    self.__pool.maybe_return_socket(sock_info)
-                except socket.error:
-                    # There was an exception and we've closed the socket
-                    pass
-            else:
+            if not exhaust:
                 self.__pool.maybe_return_socket(sock_info)
+
+    def _exhaust_next(self, sock_info):
+        """Used with exhaust cursors to get the next batch off the socket.
+        """
+        return self.__receive_message_on_socket(1, None, sock_info)
 
     def start_request(self):
         """Ensure the current thread or greenlet always uses the same socket
@@ -1241,6 +1269,22 @@ class MongoClient(common.BaseObject):
             return self.admin.command("copydb", **command)
         finally:
             self.end_request()
+
+    def get_default_database(self):
+        """Get the database named in the MongoDB connection URI.
+
+        >>> uri = 'mongodb://host/my_database'
+        >>> client = MongoClient(uri)
+        >>> db = client.get_default_database()
+        >>> assert db.name == 'my_database'
+
+        Useful in scripts where you want to choose which database to use
+        based only on the URI in a configuration file.
+        """
+        if self.__default_database_name is None:
+            raise ConfigurationError('No default database defined')
+
+        return self[self.__default_database_name]
 
     @property
     def is_locked(self):

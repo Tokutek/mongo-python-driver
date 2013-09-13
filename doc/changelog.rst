@@ -1,23 +1,96 @@
 Changelog
 =========
 
-Changes in Version 2.5.1+
--------------------------
+Changes in Version 2.6.2
+------------------------
+
+Version 2.6.2 fixes a :exc:`TypeError` problem when max_pool_size=None
+is used in Python 3.
+
+Issues Resolved
+...............
+
+See the `PyMongo 2.6.2 release notes in JIRA`_ for the list of resolved issues
+in this release.
+
+.. _PyMongo 2.6.2 release notes in JIRA: https://jira.mongodb.org/browse/PYTHON/fixforversion/12910
+
+Changes in Version 2.6.1
+------------------------
+
+Version 2.6.1 fixes a reference leak in
+the :meth:`~pymongo.collection.Collection.insert` method.
+
+Issues Resolved
+...............
+
+See the `PyMongo 2.6.1 release notes in JIRA`_ for the list of resolved issues
+in this release.
+
+.. _PyMongo 2.6.1 release notes in JIRA: https://jira.mongodb.org/browse/PYTHON/fixforversion/12905
+
+Changes in Version 2.6
+----------------------
+
+Version 2.6 includes some frequently requested improvements and adds
+support for some early MongoDB 2.6 features.
+
+Special thanks go to Justin Patrin for his work on the connection pool
+in this release.
 
 Important new features:
 
-- The `max_pool_size` option for :class:`~pymongo.mongo_client.MongoClient` and
-  :class:`~pymongo.mongo_replica_set_client.MongoReplicaSetClient` now actually
-  caps the number of sockets the pool will open concurrently. Connection or
-  query attempts when the pool has reached `max_pool_size` block waiting for a
-  socket to be returned to the pool. If ``waitQueueTimeoutMS`` is set, an
-  operation that blocks waiting for a socket will raise
-  :exc:`~pymongo.errors.ConnectionFailure` after the timeout. By default
-  ``waitQueueTimeoutMS`` is not set.
+- The ``max_pool_size`` option for :class:`~pymongo.mongo_client.MongoClient`
+  and :class:`~pymongo.mongo_replica_set_client.MongoReplicaSetClient` now
+  actually caps the number of sockets the pool will open concurrently.
+  Once the pool has reached :attr:`~pymongo.mongo_client.MongoClient.max_pool_size`
+  operations will block waiting for a socket to become available. If
+  ``waitQueueTimeoutMS`` is set, an operation that blocks waiting for a socket
+  will raise :exc:`~pymongo.errors.ConnectionFailure` after the timeout. By
+  default ``waitQueueTimeoutMS`` is not set.
+  See :ref:`connection-pooling` for more information.
+- The :meth:`~pymongo.collection.Collection.insert` method automatically splits
+  large batches of documents into multiple insert messages based on
+  :attr:`~pymongo.mongo_client.MongoClient.max_message_size`
+- Support for the exhaust cursor flag.
+  See :meth:`~pymongo.collection.Collection.find` for details and caveats.
+- Support for the PLAIN and MONGODB-X509 authentication mechanisms.
+  See :doc:`the authentication docs </examples/authentication>` for more
+  information.
+- Support aggregation output as a :class:`~pymongo.cursor.Cursor`. See
+  :meth:`~pymongo.collection.Collection.aggregate` for details.
 
-.. warning:: SIGNIFICANT BEHAVIOR CHANGE in 2.5.1+. Previously, `max_pool_size`
+.. warning:: SIGNIFICANT BEHAVIOR CHANGE in 2.6. Previously, `max_pool_size`
   would limit only the idle sockets the pool would hold onto, not the
   number of open sockets. The default has also changed, from 10 to 100.
+  If you pass a value for ``max_pool_size`` make sure it is large enough for
+  the expected load. (Sockets are only opened when needed, so there is no cost
+  to having a ``max_pool_size`` larger than necessary. Err towards a larger
+  value.) If your application accepts the default, continue to do so.
+
+  See :ref:`connection-pooling` for more information.
+
+Issues Resolved
+...............
+
+See the `PyMongo 2.6 release notes in JIRA`_ for the list of resolved issues
+in this release.
+
+.. _PyMongo 2.6 release notes in JIRA: https://jira.mongodb.org/browse/PYTHON/fixforversion/12380
+
+Changes in Version 2.5.2
+------------------------
+
+Version 2.5.2 fixes a NULL pointer dereference issue when decoding
+an invalid :class:`~bson.dbref.DBRef`.
+
+Issues Resolved
+...............
+
+See the `PyMongo 2.5.2 release notes in JIRA`_ for the list of resolved issues
+in this release.
+
+.. _PyMongo 2.5.2 release notes in JIRA: https://jira.mongodb.org/browse/PYTHON/fixforversion/12581
 
 Changes in Version 2.5.1
 ------------------------

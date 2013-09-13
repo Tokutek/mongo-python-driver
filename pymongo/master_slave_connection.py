@@ -117,6 +117,25 @@ class MasterSlaveConnection(BaseObject):
     def tz_aware(self):
         return self.__tz_aware
 
+    @property
+    def max_bson_size(self):
+        """Return the maximum size BSON object the connected master
+        accepts in bytes. Defaults to 4MB in server < 1.7.4.
+
+        .. versionadded:: 2.6
+        """
+        return self.master.max_bson_size
+
+    @property
+    def max_message_size(self):
+        """Return the maximum message size the connected master
+        accepts in bytes.
+
+        .. versionadded:: 2.6
+        """
+        return self.master.max_message_size
+
+
     def disconnect(self):
         """Disconnect from MongoDB.
 
@@ -139,6 +158,11 @@ class MasterSlaveConnection(BaseObject):
         self.__master.set_cursor_manager(manager_class)
         for slave in self.__slaves:
             slave.set_cursor_manager(manager_class)
+
+    def _ensure_connected(self, sync):
+        """Ensure the master is connected to a mongod/s.
+        """
+        self.__master._ensure_connected(sync)
 
     # _connection_to_use is a hack that we need to include to make sure
     # that killcursor operations can be sent to the same instance on which
@@ -178,20 +202,20 @@ class MasterSlaveConnection(BaseObject):
         """
         if _connection_to_use is not None:
             if _connection_to_use == -1:
-                return (-1,
-                         self.__master._send_message_with_response(message,
-                                                                   **kwargs))
+                member = self.__master
+                conn = -1
             else:
-                return (_connection_to_use,
-                        self.__slaves[_connection_to_use]
-                        ._send_message_with_response(message, **kwargs))
+                member = self.__slaves[_connection_to_use]
+                conn = _connection_to_use
+            return (conn,
+                    member._send_message_with_response(message, **kwargs)[1])
 
         # _must_use_master is set for commands, which must be sent to the
         # master instance. any queries in a request must be sent to the
         # master since that is where writes go.
         if _must_use_master or self.in_request():
             return (-1, self.__master._send_message_with_response(message,
-                                                                  **kwargs))
+                                                                  **kwargs)[1])
 
         # Iterate through the slaves randomly until we have success. Raise
         # reconnect if they all fail.
@@ -199,7 +223,8 @@ class MasterSlaveConnection(BaseObject):
             try:
                 slave = self.__slaves[connection_id]
                 return (connection_id,
-                        slave._send_message_with_response(message, **kwargs))
+                        slave._send_message_with_response(message,
+                                                          **kwargs)[1])
             except AutoReconnect:
                 pass
 

@@ -47,12 +47,17 @@ nodes = {}
 routers = {}
 cur_port = port
 
+try:
+    from subprocess import DEVNULL  # Python 3.
+except ImportError:
+    DEVNULL = open(os.devnull, 'wb')
+
 
 def kill_members(members, sig, hosts=nodes):
     for member in sorted(members):
         try:
             if ha_tools_debug:
-                print 'killing', member
+                print('killing %s' % (member,)),
             proc = hosts[member]['proc']
             # Not sure if cygwin makes sense here...
             if sys.platform in ('win32', 'cygwin'):
@@ -61,7 +66,7 @@ def kill_members(members, sig, hosts=nodes):
                 os.kill(proc.pid, sig)
         except OSError:
             if ha_tools_debug:
-                print member, 'already dead?'
+                print('%s already dead?' % (member,))
 
 
 def kill_all_members():
@@ -87,6 +92,11 @@ def wait_for(proc, port_num):
     return False
 
 
+def start_subprocess(cmd):
+    """Run cmd (a list of strings) and return a Popen instance."""
+    return subprocess.Popen(cmd, stdout=DEVNULL, stderr=DEVNULL)
+
+
 def start_replica_set(members, auth=False, fresh=True):
     global cur_port
 
@@ -99,9 +109,10 @@ def start_replica_set(members, auth=False, fresh=True):
 
         try:
             os.makedirs(dbpath)
-        except OSError, e:
-            print e
-            print "\tWhile creating", dbpath
+        except OSError:
+            exc = sys.exc_info()[1]
+            print(exc)
+            print("\tWhile creating %s" % (dbpath,))
 
     if auth:
         key_file = os.path.join(dbpath, 'key.txt')
@@ -113,7 +124,7 @@ def start_replica_set(members, auth=False, fresh=True):
                 f.close()
             os.chmod(key_file, S_IRUSR)
 
-    for i in xrange(len(members)):
+    for i in range(len(members)):
         host = '%s:%d' % (hostname, cur_port)
         members[i].update({'_id': i, 'host': host})
         path = os.path.join(dbpath, 'db' + str(i))
@@ -132,11 +143,9 @@ def start_replica_set(members, auth=False, fresh=True):
             cmd += ['--keyFile', key_file]
 
         if ha_tools_debug:
-            print 'starting', ' '.join(cmd)
+            print('starting %s' % (' '.join(cmd),))
 
-        proc = subprocess.Popen(cmd,
-                                stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT)
+        proc = start_subprocess(cmd)
         nodes[host] = {'proc': proc, 'cmd': cmd}
         res = wait_for(proc, cur_port)
 
@@ -150,13 +159,14 @@ def start_replica_set(members, auth=False, fresh=True):
     c = pymongo.MongoClient(primary, use_greenlets=use_greenlets)
     try:
         if ha_tools_debug:
-            print 'rs.initiate(%s)' % config
+            print('rs.initiate(%s)' % (config,))
 
         c.admin.command('replSetInitiate', config)
-    except pymongo.errors.OperationFailure, e:
+    except pymongo.errors.OperationFailure:
         # Already initialized from a previous run?
         if ha_tools_debug:
-            print e
+            exc = sys.exc_info()[1]
+            print(exc)
 
     expected_arbiters = 0
     for member in members:
@@ -166,7 +176,7 @@ def start_replica_set(members, auth=False, fresh=True):
 
     # Wait for 8 minutes for replica set to come up
     patience = 8
-    for i in range(patience * 60 / 2):
+    for i in range(int(patience * 60 / 2)):
         time.sleep(2)
         try:
             if (get_primary() and
@@ -178,7 +188,7 @@ def start_replica_set(members, auth=False, fresh=True):
             pass
 
         if ha_tools_debug:
-            print 'waiting for RS', i
+            print('waiting for RS %s' % (i,))
     else:
         kill_all_members()
         raise Exception(
@@ -200,9 +210,7 @@ def create_sharded_cluster(num_routers=3):
            '--port', str(cur_port),
            '--nojournal', '--logappend',
            '--logpath', configdb_logpath]
-    proc = subprocess.Popen(cmd,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT)
+    proc = start_subprocess(cmd)
     nodes[configdb_host] = {'proc': proc, 'cmd': cmd}
     res = wait_for(proc, cur_port)
     if not res:
@@ -220,9 +228,7 @@ def create_sharded_cluster(num_routers=3):
            '--port', str(cur_port),
            '--nojournal', '--logappend',
            '--logpath', db_logpath]
-    proc = subprocess.Popen(cmd,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT)
+    proc = start_subprocess(cmd)
     nodes[shard_host] = {'proc': proc, 'cmd': cmd}
     res = wait_for(proc, cur_port)
     if not res:
@@ -230,7 +236,7 @@ def create_sharded_cluster(num_routers=3):
 
     # ...and a few mongos instances
     cur_port = cur_port + 1
-    for i in xrange(num_routers):
+    for i in range(num_routers):
         cur_port = cur_port + i
         host = '%s:%d' % (hostname, cur_port)
         mongos_logpath = os.path.join(logpath, 'mongos' + str(i) + '.log')
@@ -239,9 +245,7 @@ def create_sharded_cluster(num_routers=3):
                '--logappend',
                '--logpath', mongos_logpath,
                '--configdb', configdb_host]
-        proc = subprocess.Popen(cmd,
-                                stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT)
+        proc = start_subprocess(cmd)
         routers[host] = {'proc': proc, 'cmd': cmd}
         res = wait_for(proc, cur_port)
         if not res:
@@ -369,18 +373,19 @@ def stepdown_primary():
     primary = get_primary()
     if primary:
         if ha_tools_debug:
-            print 'stepping down primary:', primary
+            print('stepping down primary: %s' % (primary,))
         c = pymongo.MongoClient(primary, use_greenlets=use_greenlets)
         # replSetStepDown causes mongod to close all connections
         try:
             c.admin.command('replSetStepDown', 20)
-        except Exception, e:
+        except Exception:
             if ha_tools_debug:
-                print 'Exception from replSetStepDown:', e
+                exc = sys.exc_info()[1]
+                print('Exception from replSetStepDown: %s' % (exc.message,))
         if ha_tools_debug:
-            print '\tcalled replSetStepDown'
+            print('\tcalled replSetStepDown')
     elif ha_tools_debug:
-        print 'stepdown_primary() found no primary'
+        print('stepdown_primary() found no primary')
 
 
 def set_maintenance(member, value):
@@ -403,9 +408,7 @@ def restart_members(members, router=False):
             cmd = routers[member]['cmd']
         else:
             cmd = nodes[member]['cmd']
-        proc = subprocess.Popen(cmd,
-                                stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT)
+        proc = start_subprocess(cmd)
         if router:
             routers[member]['proc'] = proc
         else:

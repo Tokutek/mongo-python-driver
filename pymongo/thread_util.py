@@ -25,9 +25,19 @@ except ImportError:
 have_gevent = True
 try:
     import greenlet
-    import gevent.coros
+
+    try:
+        # gevent-1.0rc2 and later.
+        from gevent.lock import BoundedSemaphore as GeventBoundedSemaphore
+    except ImportError:
+        from gevent.coros import BoundedSemaphore as GeventBoundedSemaphore
+
+    from gevent.greenlet import SpawnedLink
+
 except ImportError:
     have_gevent = False
+
+from pymongo.errors import ExceededMaxWaiters
 
 
 # Do we have to work around http://bugs.python.org/issue1868?
@@ -111,14 +121,24 @@ class GreenletIdent(Ident):
             # This is a Gevent Greenlet (capital G), which inherits from
             # greenlet and provides a 'link' method to detect when the
             # Greenlet exits.
-            current.link(callback)
-            self._refs[tid] = None
+            link = SpawnedLink(callback)
+            current.rawlink(link)
+            self._refs[tid] = link
         else:
             # This is a non-Gevent greenlet (small g), or it's the main
             # greenlet.
             self._refs[tid] = weakref.ref(current, callback)
 
-
+    def unwatch(self, tid):
+        """ call unlink if link before """
+        link = self._refs.pop(tid, None)
+        current = greenlet.getcurrent()
+        if hasattr(current, 'unlink'):
+            # This is a Gevent enhanced Greenlet. Remove the SpawnedLink we
+            # linked to it.
+            current.unlink(link)
+            
+            
 def create_ident(use_greenlets):
     if use_greenlets:
         return GreenletIdent()
@@ -238,10 +258,6 @@ class DummySemaphore(object):
         pass
 
 
-class ExceededMaxWaiters(Exception):
-    pass
-
-
 class MaxWaitersBoundedSemaphore(object):
     def __init__(self, semaphore_class, value=1, max_waiters=1):
         self.waiter_semaphore = semaphore_class(max_waiters)
@@ -269,7 +285,7 @@ if have_gevent:
     class MaxWaitersBoundedSemaphoreGevent(MaxWaitersBoundedSemaphore):
         def __init__(self, value=1, max_waiters=1):
             MaxWaitersBoundedSemaphore.__init__(
-                self, gevent.coros.BoundedSemaphore, value, max_waiters)
+                self, GeventBoundedSemaphore, value, max_waiters)
 
 
 def create_semaphore(max_size, max_waiters, use_greenlets):
@@ -277,7 +293,7 @@ def create_semaphore(max_size, max_waiters, use_greenlets):
         return DummySemaphore()
     elif use_greenlets:
         if max_waiters is None:
-            return gevent.coros.BoundedSemaphore(max_size)
+            return GeventBoundedSemaphore(max_size)
         else:
             return MaxWaitersBoundedSemaphoreGevent(max_size, max_waiters)
     else:

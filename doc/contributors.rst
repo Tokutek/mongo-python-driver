@@ -63,3 +63,5 @@ The following is a list of people who have contributed to
 - Emily Stolfo (estolfo)
 - Sam Helman (shelman)
 - Justin Patrin (reversefold)
+- Xiuming Chen (cxmcc)
+- Tyler Jones (thomascirca)

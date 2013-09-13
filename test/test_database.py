@@ -114,6 +114,10 @@ class TestDatabase(unittest.TestCase):
         for coll in colls:
             self.assertTrue("$" not in coll)
 
+        colls_without_systems = db.collection_names(False)
+        for coll in colls_without_systems:
+            self.assertTrue(not coll.startswith("system."))
+
     def test_drop_collection(self):
         db = Database(self.client, "pymongo_test")
 
@@ -274,6 +278,24 @@ class TestDatabase(unittest.TestCase):
         db = self.client.admin
 
         self.assertEqual(db.command("buildinfo"), db.command({"buildinfo": 1}))
+
+    def test_command_ignores_network_timeout(self):
+        # command() should ignore network_timeout.
+        if not version.at_least(self.client, (1, 9, 0)):
+            raise SkipTest("Need sleep() to test command with network timeout")
+
+        db = self.client.pymongo_test
+
+        # No errors.
+        db.test.remove()
+        db.test.insert({})
+        cursor = db.test.find(
+            {'$where': 'sleep(100); return true'}, network_timeout=0.001)
+
+        self.assertEqual(1, cursor.count())
+        # mongos doesn't support the eval command
+        if not is_mongos(self.client):
+            db.command('eval', 'sleep(100)', network_timeout=0.001)
 
     def test_last_status(self):
         db = self.client.pymongo_test

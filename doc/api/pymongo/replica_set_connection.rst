@@ -26,6 +26,7 @@
       .. autoattribute:: document_class
       .. autoattribute:: tz_aware
       .. autoattribute:: max_bson_size
+      .. autoattribute:: max_message_size
       .. autoattribute:: auto_start_request
       .. autoattribute:: read_preference
       .. autoattribute:: tag_sets
@@ -35,6 +36,7 @@
       .. automethod:: database_names
       .. automethod:: drop_database
       .. automethod:: copy_database(from_name, to_name[, from_host=None[, username=None[, password=None]]])
+      .. automethod:: get_default_database
       .. automethod:: close_cursor
       .. automethod:: get_lasterror_options
       .. automethod:: set_lasterror_options

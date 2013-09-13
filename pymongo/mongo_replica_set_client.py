@@ -56,7 +56,8 @@ from pymongo.errors import (AutoReconnect,
                             ConnectionFailure,
                             DuplicateKeyError,
                             InvalidDocument,
-                            OperationFailure)
+                            OperationFailure,
+                            InvalidOperation)
 
 EMPTY = b("")
 MAX_BSON_SIZE = 4 * 1024 * 1024
@@ -269,21 +270,32 @@ class Monitor(object):
 
     def __init__(self, rsc, event_class):
         self.rsc = weakref.proxy(rsc, self.shutdown)
-        self.event = event_class()
+        self.timer = event_class()
         self.refreshed = event_class()
+        self.started_event = event_class()
         self.stopped = False
+
+    def start_sync(self):
+        """Start the Monitor and block until it's really started.
+        """
+        self.start()  # Implemented in subclasses.
+        self.started_event.wait(5)
 
     def shutdown(self, dummy=None):
         """Signal the monitor to shutdown.
         """
         self.stopped = True
-        self.event.set()
+        self.timer.set()
 
     def schedule_refresh(self):
         """Refresh immediately
         """
+        if not self.isAlive():
+            raise InvalidOperation(
+                "Monitor thread is dead: Perhaps started before a fork?")
+
         self.refreshed.clear()
-        self.event.set()
+        self.timer.set()
 
     def wait_for_refresh(self, timeout_seconds):
         """Block until a scheduled refresh completes
@@ -294,11 +306,12 @@ class Monitor(object):
         """Run until the RSC is collected or an
         unexpected error occurs.
         """
+        self.started_event.set()
         while True:
-            self.event.wait(Monitor._refresh_interval)
+            self.timer.wait(Monitor._refresh_interval)
             if self.stopped:
                 break
-            self.event.clear()
+            self.timer.clear()
 
             try:
                 try:
@@ -313,8 +326,11 @@ class Monitor(object):
             except:
                 break
 
+    def isAlive(self):
+        raise NotImplementedError()
 
-class MonitorThread(Monitor, threading.Thread):
+
+class MonitorThread(threading.Thread, Monitor):
     """Thread based replica set monitor.
     """
     def __init__(self, rsc):
@@ -359,6 +375,10 @@ try:
             """
             self.monitor()
 
+        def isAlive(self):
+            # Gevent defines bool(Greenlet) as True if it's alive.
+            return bool(self)
+
 except ImportError:
     pass
 
@@ -393,6 +413,8 @@ class Member(object):
         self.tags = ismaster_response.get('tags', {})
         self.max_bson_size = ismaster_response.get(
             'maxBsonObjectSize', MAX_BSON_SIZE)
+        self.max_message_size = ismaster_response.get(
+            'maxMessageSizeBytes', 2 * self.max_bson_size)
 
     def clone_with(self, ismaster_response, ping_time_sample):
         """Get a clone updated with ismaster response and a single ping time.
@@ -465,7 +487,7 @@ class MongoReplicaSetClient(common.BaseObject):
     """Connection to a MongoDB replica set.
     """
 
-    def __init__(self, hosts_or_uri=None, max_pool_size=10,
+    def __init__(self, hosts_or_uri=None, max_pool_size=100,
                  document_class=dict, tz_aware=False, _connect=True, **kwargs):
         """Create a new connection to a MongoDB replica set.
 
@@ -494,13 +516,20 @@ class MongoReplicaSetClient(common.BaseObject):
            sure you call :meth:`~close` to ensure that the monitor task is
            cleanly shut down.
 
+        .. note:: A :class:`MongoReplicaSetClient` created before a call to
+           ``os.fork()`` is invalid after the fork. Applications should either
+           fork before creating the client, or recreate the client after a
+           fork.
+
         :Parameters:
           - `hosts_or_uri` (optional): A MongoDB URI or string of `host:port`
             pairs. If a host is an IPv6 literal it must be enclosed in '[' and
             ']' characters following the RFC2732 URL syntax (e.g. '[::1]' for
             localhost)
-          - `max_pool_size` (optional): The maximum number of idle connections
-            to keep open in each pool for future use
+          - `max_pool_size` (optional): The maximum number of connections
+            each pool will open simultaneously. If this is set, operations
+            will block if there are `max_pool_size` outstanding connections
+            from the pool. Defaults to 100.
           - `document_class` (optional): default class to use for
             documents returned from queries on this client
           - `tz_aware` (optional): if ``True``,
@@ -605,8 +634,8 @@ class MongoReplicaSetClient(common.BaseObject):
         self.__index_cache = {}
         self.__auth_credentials = {}
 
-        self.__max_pool_size = common.validate_positive_integer(
-                                        'max_pool_size', max_pool_size)
+        self.__max_pool_size = common.validate_positive_integer_or_none(
+            'max_pool_size', max_pool_size)
         self.__tz_aware = common.validate_boolean('tz_aware', tz_aware)
         self.__document_class = document_class
         self.__monitor = None
@@ -619,7 +648,8 @@ class MongoReplicaSetClient(common.BaseObject):
             raise TypeError("port must be an instance of int")
 
         username = None
-        db_name = None
+        password = None
+        self.__default_database_name = None
         options = {}
         if host is None:
             self.__seeds.add(('localhost', port))
@@ -628,7 +658,7 @@ class MongoReplicaSetClient(common.BaseObject):
             self.__seeds.update(res['nodelist'])
             username = res['username']
             password = res['password']
-            db_name = res['database']
+            self.__default_database_name = res['database']
             options = res['options']
         else:
             self.__seeds.update(uri_parser.split_hosts(host, port))
@@ -678,10 +708,10 @@ class MongoReplicaSetClient(common.BaseObject):
                                      % ', '.join(ssl_kwarg_keys))
 
         if self.__ssl_cert_reqs and not self.__ssl_ca_certs:
-                raise ConfigurationError("If `ssl_cert_reqs` is not "
-                                         "`ssl.CERT_NONE` then you must "
-                                         "include `ssl_ca_certs` to be able "
-                                         "to validate the server.")
+            raise ConfigurationError("If `ssl_cert_reqs` is not "
+                                     "`ssl.CERT_NONE` then you must "
+                                     "include `ssl_ca_certs` to be able "
+                                     "to validate the server.")
 
         if ssl_kwarg_keys and self.__use_ssl is None:
             # ssl options imply ssl = True
@@ -706,19 +736,18 @@ class MongoReplicaSetClient(common.BaseObject):
                 # ConnectionFailure makes more sense here than AutoReconnect
                 raise ConnectionFailure(str(e))
 
-        db_name = options.get('authsource', db_name)
-        if db_name and username is None:
-            warnings.warn("database name or authSource in URI is being "
-                          "ignored. If you wish to authenticate to %s, you "
-                          "must provide a username and password." % (db_name,))
         if username:
             mechanism = options.get('authmechanism', 'MONGODB-CR')
-            if mechanism == 'GSSAPI':
-                source = '$external'
-            else:
-                source = db_name or 'admin'
-            credentials = (source, unicode(username),
-                           unicode(password), mechanism)
+            source = (
+                options.get('authsource')
+                or self.__default_database_name
+                or 'admin')
+
+            credentials = auth._build_credentials_tuple(mechanism,
+                                                        source,
+                                                        unicode(username),
+                                                        unicode(password),
+                                                        options)
             try:
                 self._cache_credentials(source, credentials, _connect)
             except OperationFailure, exc:
@@ -735,7 +764,11 @@ class MongoReplicaSetClient(common.BaseObject):
         register_monitor(self.__monitor)
 
         if _connect:
-            self.__monitor.start()
+            # Wait for the monitor to really start. Otherwise if we return to
+            # caller and caller forks immediately, the monitor could think it's
+            # still alive in the child process when it really isn't.
+            # See http://bugs.python.org/issue18418.
+            self.__monitor.start_sync()
 
     def _cached(self, dbname, coll, index):
         """Test if `index` is cached.
@@ -841,7 +874,7 @@ class MongoReplicaSetClient(common.BaseObject):
 
             # Logout any credentials that no longer exist in the cache.
             for credentials in authset - cached:
-                self.__simple_command(sock_info, credentials[0], {'logout': 1})
+                self.__simple_command(sock_info, credentials[1], {'logout': 1})
                 sock_info.authset.discard(credentials)
 
             for credentials in cached - authset:
@@ -908,12 +941,12 @@ class MongoReplicaSetClient(common.BaseObject):
         a blocked operation will raise :exc:`~pymongo.errors.ConnectionFailure`
         after a timeout. By default ``waitQueueTimeoutMS`` is not set.
 
-        .. warning:: SIGNIFICANT BEHAVIOR CHANGE in 2.5.1+. Previously, this
+        .. warning:: SIGNIFICANT BEHAVIOR CHANGE in 2.6. Previously, this
           parameter would limit only the idle sockets the pool would hold
           onto, not the number of open sockets. The default has also changed
           to 100.
 
-        .. versionchanged:: 2.5.1+
+        .. versionchanged:: 2.6
         """
         return self.__max_pool_size
 
@@ -954,6 +987,16 @@ class MongoReplicaSetClient(common.BaseObject):
         rs_state = self.__rs_state
         if rs_state.primary_member:
             return rs_state.primary_member.max_bson_size
+        return 0
+
+    @property
+    def max_message_size(self):
+        """Returns the maximum message size the connected primary
+        accepts in bytes. Returns 0 if no primary is available.
+        """
+        rs_state = self.__rs_state
+        if rs_state.primary_member:
+            return rs_state.primary_member.max_message_size
         return 0
 
     @property
@@ -1183,6 +1226,22 @@ class MongoReplicaSetClient(common.BaseObject):
             raise
         return sock_info
 
+    def _ensure_connected(self, sync=False):
+        """Ensure this client instance is connected to a primary.
+        """
+        # This may be the first time we're connecting to the set.
+        if self.__monitor and not self.__monitor.started:
+            try:
+                self.__monitor.start()
+            # Minor race condition. It's possible that two (or more)
+            # threads could call monitor.start() consecutively. Just pass.
+            except RuntimeError:
+                pass
+        if sync:
+            rs_state = self.__rs_state
+            if not rs_state.primary_member:
+                self.__schedule_refresh(sync)
+
     def disconnect(self):
         """Disconnect from the replica set primary, unpin all members, and
         refresh our view of the replica set.
@@ -1250,7 +1309,8 @@ class MongoReplicaSetClient(common.BaseObject):
             except (socket.error, ConnectionFailure):
                 return False
         finally:
-            member.pool.maybe_return_socket(sock_info)
+            if member and sock_info:
+                member.pool.maybe_return_socket(sock_info)
 
     def __check_response_to_last_error(self, response):
         """Check a response to a lastError message for errors.
@@ -1297,16 +1357,18 @@ class MongoReplicaSetClient(common.BaseObject):
             message += chunk
         return message
 
-    def __recv_msg(self, operation, request_id, sock):
-        """Receive a message in response to `request_id` on `sock`.
+    def __recv_msg(self, operation, rqst_id, sock):
+        """Receive a message in response to `rqst_id` on `sock`.
 
         Returns the response data with the header removed.
         """
         header = self.__recv_data(16, sock)
         length = struct.unpack("<i", header[:4])[0]
-        resp_id = struct.unpack("<i", header[8:12])[0]
-        assert resp_id == request_id, "ids don't match %r %r" % (resp_id,
-                                                                 request_id)
+        # No rqst_id for exhaust cursor "getMore".
+        if rqst_id is not None:
+            resp_id = struct.unpack("<i", header[8:12])[0]
+            assert rqst_id == resp_id, "ids don't match %r %r" % (rqst_id,
+                                                                  resp_id)
         assert operation == struct.unpack("<i", header[12:])[0]
 
         return self.__recv_data(length - 16, sock)
@@ -1346,9 +1408,7 @@ class MongoReplicaSetClient(common.BaseObject):
           - `with_last_error`: check getLastError status after sending the
             message
         """
-        # This may be the first time we're connecting to the set.
-        if self.__monitor and not self.__monitor.started:
-            self.__monitor.start()
+        self._ensure_connected()
 
         if _connection_to_use in (None, -1):
             member = self.__find_primary()
@@ -1391,27 +1451,28 @@ class MongoReplicaSetClient(common.BaseObject):
         Can raise socket.error.
         """
         sock_info = None
+        exhaust = kwargs.get('exhaust')
+        rqst_id, data = self.__check_bson_size(msg, member.max_bson_size)
         try:
-            try:
-                sock_info = self.__socket(member)
+            sock_info = self.__socket(member)
 
-                if "network_timeout" in kwargs:
-                    sock_info.sock.settimeout(kwargs['network_timeout'])
+            if not exhaust and "network_timeout" in kwargs:
+                sock_info.sock.settimeout(kwargs['network_timeout'])
 
-                rqst_id, data = self.__check_bson_size(msg, member.max_bson_size)
-                sock_info.sock.sendall(data)
-                response = self.__recv_msg(1, rqst_id, sock_info)
+            sock_info.sock.sendall(data)
+            response = self.__recv_msg(1, rqst_id, sock_info)
 
+            if not exhaust:
                 if "network_timeout" in kwargs:
                     sock_info.sock.settimeout(self.__net_timeout)
+                member.pool.maybe_return_socket(sock_info)
 
-                return response
-            except:
-                if sock_info is not None:
-                    sock_info.close()
-                raise
-        finally:
-            member.pool.maybe_return_socket(sock_info)
+            return response, sock_info, member.pool
+        except:
+            if sock_info is not None:
+                sock_info.close()
+                member.pool.maybe_return_socket(sock_info)
+            raise
 
     def __try_read(self, member, msg, **kwargs):
         """Attempt a read from a member; on failure mark the member "down" and
@@ -1449,9 +1510,7 @@ class MongoReplicaSetClient(common.BaseObject):
             used by Cursor for getMore and killCursors messages.
           - `_must_use_master`: If True, send to primary.
         """
-        # This may be the first time we're connecting to the set.
-        if self.__monitor and not self.__monitor.started:
-            self.__monitor.start()
+        self._ensure_connected()
 
         rs_state = self.__rs_state
         tag_sets = kwargs.get('tag_sets', [{}])
@@ -1560,6 +1619,11 @@ class MongoReplicaSetClient(common.BaseObject):
             msg += " and tags " + repr(tag_sets)
 
         raise AutoReconnect(msg, errors)
+
+    def _exhaust_next(self, sock_info):
+        """Used with exhaust cursors to get the next batch off the socket.
+        """
+        return self.__recv_msg(1, None, sock_info)
 
     def start_request(self):
         """Ensure the current thread or greenlet always uses the same socket
@@ -1762,3 +1826,19 @@ class MongoReplicaSetClient(common.BaseObject):
             return self.admin.command("copydb", **command)
         finally:
             self.end_request()
+
+    def get_default_database(self):
+        """Get the database named in the MongoDB connection URI.
+
+        >>> uri = 'mongodb://host/my_database'
+        >>> client = MongoReplicaSetClient(uri)
+        >>> db = client.get_default_database()
+        >>> assert db.name == 'my_database'
+
+        Useful in scripts where you want to choose which database to use
+        based only on the URI in a configuration file.
+        """
+        if self.__default_database_name is None:
+            raise ConfigurationError('No default database defined')
+
+        return self[self.__default_database_name]

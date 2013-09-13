@@ -34,6 +34,28 @@ _QUERY_OPTIONS = {
     "partial": 128}
 
 
+# This has to be an old style class due to
+# http://bugs.jython.org/issue1057
+class _SocketManager:
+    """Used with exhaust cursors to ensure the socket is returned.
+    """
+    def __init__(self, sock, pool):
+        self.sock = sock
+        self.pool = pool
+        self.__closed = False
+
+    def __del__(self):
+        self.close()
+
+    def close(self):
+        """Return this instance's socket to the connection pool.
+        """
+        if not self.__closed:
+            self.__closed = True
+            self.pool.maybe_return_socket(self.sock)
+            self.sock, self.pool = None, None
+
+
 # TODO might be cool to be able to do find().include("foo") or
 # find().exclude(["bar", "baz"]) or find().slice("a", 1, 2) as an
 # alternative to the fields specifier.
@@ -46,8 +68,10 @@ class Cursor(object):
                  max_scan=None, as_class=None, slave_okay=False,
                  await_data=False, partial=False, manipulate=True,
                  read_preference=ReadPreference.PRIMARY, tag_sets=[{}],
-                 secondary_acceptable_latency_ms=None,
-                 _must_use_master=False, _uuid_subtype=None, **kwargs):
+                 secondary_acceptable_latency_ms=None, exhaust=False,
+                 _must_use_master=False, _uuid_subtype=None,
+                 _first_batch=None, _cursor_id=None,
+                 **kwargs):
         """Create a new cursor.
 
         Should not be called directly by application developers - see
@@ -55,7 +79,8 @@ class Cursor(object):
 
         .. mongodoc:: cursors
         """
-        self.__id = None
+        self.__id = _cursor_id
+        self.__is_command_cursor = _cursor_id is not None
 
         if spec is None:
             spec = {}
@@ -78,6 +103,8 @@ class Cursor(object):
             raise TypeError("await_data must be an instance of bool")
         if not isinstance(partial, bool):
             raise TypeError("partial must be an instance of bool")
+        if not isinstance(exhaust, bool):
+            raise TypeError("exhaust must be an instance of bool")
 
         if fields is not None:
             if not fields:
@@ -95,6 +122,15 @@ class Cursor(object):
         self.__limit = limit
         self.__batch_size = 0
 
+        # Exhaust cursor support
+        if self.__collection.database.connection.is_mongos and exhaust:
+            raise InvalidOperation('Exhaust cursors are '
+                                   'not supported by mongos')
+        if limit and exhaust:
+            raise InvalidOperation("Can't use limit and exhaust together.")
+        self.__exhaust = exhaust
+        self.__exhaust_mgr = None
+
         # This is ugly. People want to be able to do cursor[5:5] and
         # get an empty result set (old behavior was an
         # exception). It's hard to do that right, though, because the
@@ -103,10 +139,6 @@ class Cursor(object):
         # it anytime we change __limit.
         self.__empty = False
 
-        self.__timeout = timeout
-        self.__tailable = tailable
-        self.__await_data = tailable and await_data
-        self.__partial = partial
         self.__snapshot = snapshot
         self.__ordering = sort and helpers._index_document(sort) or None
         self.__max_scan = max_scan
@@ -121,12 +153,23 @@ class Cursor(object):
         self.__tz_aware = collection.database.connection.tz_aware
         self.__must_use_master = _must_use_master
         self.__uuid_subtype = _uuid_subtype or collection.uuid_subtype
-        self.__query_flags = 0
 
-        self.__data = deque()
+        self.__data = deque(_first_batch or [])
         self.__connection_id = None
         self.__retrieved = 0
         self.__killed = False
+
+        self.__query_flags = 0
+        if tailable:
+            self.__query_flags |= _QUERY_OPTIONS["tailable_cursor"]
+        if not timeout:
+            self.__query_flags |= _QUERY_OPTIONS["no_timeout"]
+        if tailable and await_data:
+            self.__query_flags |= _QUERY_OPTIONS["await_data"]
+        if exhaust:
+            self.__query_flags |= _QUERY_OPTIONS["exhaust"]
+        if partial:
+            self.__query_flags |= _QUERY_OPTIONS["partial"]
 
         # this is for passing network_timeout through if it's specified
         # need to use kwargs as None is a legit value for network_timeout
@@ -154,6 +197,7 @@ class Cursor(object):
         be sent to the server, even if the resultant data has already been
         retrieved by this cursor.
         """
+        self.__check_not_command_cursor('rewind')
         self.__data = deque()
         self.__id = None
         self.__connection_id = None
@@ -173,13 +217,13 @@ class Cursor(object):
         return self.__clone(True)
 
     def __clone(self, deepcopy=True):
+        self.__check_not_command_cursor('clone')
         clone = Cursor(self.__collection)
         values_to_clone = ("spec", "fields", "skip", "limit",
-                           "timeout", "snapshot", "tailable",
-                           "ordering", "explain", "hint", "batch_size",
-                           "max_scan", "as_class",  "slave_okay", "await_data",
-                           "partial", "manipulate", "read_preference",
-                           "tag_sets", "secondary_acceptable_latency_ms",
+                           "snapshot", "ordering", "explain", "hint",
+                           "batch_size", "max_scan", "as_class", "slave_okay",
+                           "manipulate", "read_preference", "tag_sets",
+                           "secondary_acceptable_latency_ms",
                            "must_use_master", "uuid_subtype", "query_flags",
                            "kwargs")
         data = dict((k, v) for k, v in self.__dict__.iteritems()
@@ -193,11 +237,19 @@ class Cursor(object):
         """Closes this cursor.
         """
         if self.__id and not self.__killed:
-            connection = self.__collection.database.connection
-            if self.__connection_id is not None:
-                connection.close_cursor(self.__id, self.__connection_id)
+            if self.__exhaust and self.__exhaust_mgr:
+                # If this is an exhaust cursor and we haven't completely
+                # exhausted the result set we *must* close the socket
+                # to stop the server from sending more data.
+                self.__exhaust_mgr.sock.close()
             else:
-                connection.close_cursor(self.__id)
+                connection = self.__collection.database.connection
+                if self.__connection_id is not None:
+                    connection.close_cursor(self.__id, self.__connection_id)
+                else:
+                    connection.close_cursor(self.__id)
+        if self.__exhaust and self.__exhaust_mgr:
+            self.__exhaust_mgr.close()
         self.__killed = True
 
     def close(self):
@@ -289,18 +341,10 @@ class Cursor(object):
         """Get the query options string to use for this query.
         """
         options = self.__query_flags
-        if self.__tailable:
-            options |= _QUERY_OPTIONS["tailable_cursor"]
         if (self.__slave_okay
             or self.__read_preference != ReadPreference.PRIMARY
         ):
             options |= _QUERY_OPTIONS["slave_okay"]
-        if not self.__timeout:
-            options |= _QUERY_OPTIONS["no_timeout"]
-        if self.__await_data:
-            options |= _QUERY_OPTIONS["await_data"]
-        if self.__partial:
-            options |= _QUERY_OPTIONS["partial"]
         return options
 
     def __check_okay_to_chain(self):
@@ -308,6 +352,13 @@ class Cursor(object):
         """
         if self.__retrieved or self.__id is not None:
             raise InvalidOperation("cannot set options after executing query")
+
+    def __check_not_command_cursor(self, method_name):
+        """Check if calling a method on this cursor is valid.
+        """
+        if self.__is_command_cursor:
+            raise InvalidOperation(
+                "cannot call %s on a command cursor" % method_name)
 
     def add_option(self, mask):
         """Set arbitary query flags using a bitmask.
@@ -318,6 +369,16 @@ class Cursor(object):
         if not isinstance(mask, int):
             raise TypeError("mask must be an int")
         self.__check_okay_to_chain()
+
+        if mask & _QUERY_OPTIONS["slave_okay"]:
+            self.__slave_okay = True
+        if mask & _QUERY_OPTIONS["exhaust"]:
+            if self.__limit:
+                raise InvalidOperation("Can't use limit and exhaust together.")
+            if self.__collection.database.connection.is_mongos:
+                raise InvalidOperation('Exhaust cursors are '
+                                       'not supported by mongos')
+            self.__exhaust = True
 
         self.__query_flags |= mask
         return self
@@ -331,6 +392,11 @@ class Cursor(object):
         if not isinstance(mask, int):
             raise TypeError("mask must be an int")
         self.__check_okay_to_chain()
+
+        if mask & _QUERY_OPTIONS["slave_okay"]:
+            self.__slave_okay = False
+        if mask & _QUERY_OPTIONS["exhaust"]:
+            self.__exhaust = False
 
         self.__query_flags &= ~mask
         return self
@@ -350,6 +416,8 @@ class Cursor(object):
         """
         if not isinstance(limit, int):
             raise TypeError("limit must be an int")
+        if self.__exhaust:
+            raise InvalidOperation("Can't use limit and exhaust together.")
         self.__check_okay_to_chain()
 
         self.__empty = False
@@ -538,11 +606,17 @@ class Cursor(object):
         .. note:: The `with_limit_and_skip` parameter requires server
            version **>= 1.1.4-**
 
+        .. note:: ``count`` ignores ``network_timeout``. For example, the
+          timeout is ignored in the following code::
+
+            collection.find({}, network_timeout=1).count()
+
         .. versionadded:: 1.1.1
            The `with_limit_and_skip` parameter.
            :meth:`~pymongo.cursor.Cursor.__len__` was deprecated in favor of
            calling :meth:`count` with `with_limit_and_skip` set to ``True``.
         """
+        self.__check_not_command_cursor('count')
         command = {"query": self.__spec, "fields": self.__fields}
 
         command['read_preference'] = self.__read_preference
@@ -591,6 +665,7 @@ class Cursor(object):
 
         .. versionadded:: 1.2
         """
+        self.__check_not_command_cursor('distinct')
         if not isinstance(key, basestring):
             raise TypeError("key must be an instance "
                             "of %s" % (basestring.__name__,))
@@ -618,6 +693,7 @@ class Cursor(object):
 
         .. mongodoc:: explain
         """
+        self.__check_not_command_cursor('explain')
         c = self.clone()
         c.__explain = True
 
@@ -684,34 +760,38 @@ class Cursor(object):
 
     def __send_message(self, message):
         """Send a query or getmore message and handles the response.
+
+        If message is ``None`` this is an exhaust cursor, which reads
+        the next result batch off the exhaust socket instead of
+        sending getMore messages to the server.
         """
-        db = self.__collection.database
-        kwargs = {"_must_use_master": self.__must_use_master}
-        kwargs["read_preference"] = self.__read_preference
-        kwargs["tag_sets"] = self.__tag_sets
-        kwargs["secondary_acceptable_latency_ms"] = (
-            self.__secondary_acceptable_latency_ms)
-        if self.__connection_id is not None:
-            kwargs["_connection_to_use"] = self.__connection_id
-        kwargs.update(self.__kwargs)
+        client = self.__collection.database.connection
 
-        try:
-            response = db.connection._send_message_with_response(message,
-                                                                 **kwargs)
-        except AutoReconnect:
-            # Don't try to send kill cursors on another socket
-            # or to another server. It can cause a _pinValue
-            # assertion on some server releases if we get here
-            # due to a socket timeout.
-            self.__killed = True
-            raise
+        if message:
+            kwargs = {"_must_use_master": self.__must_use_master}
+            kwargs["read_preference"] = self.__read_preference
+            kwargs["tag_sets"] = self.__tag_sets
+            kwargs["secondary_acceptable_latency_ms"] = (
+                self.__secondary_acceptable_latency_ms)
+            kwargs['exhaust'] = self.__exhaust
+            if self.__connection_id is not None:
+                kwargs["_connection_to_use"] = self.__connection_id
+            kwargs.update(self.__kwargs)
 
-        if isinstance(response, tuple):
-            (connection_id, response) = response
-        else:
-            connection_id = None
-
-        self.__connection_id = connection_id
+            try:
+                res = client._send_message_with_response(message, **kwargs)
+                self.__connection_id, (response, sock, pool) = res
+                if self.__exhaust:
+                    self.__exhaust_mgr = _SocketManager(sock, pool)
+            except AutoReconnect:
+                # Don't try to send kill cursors on another socket
+                # or to another server. It can cause a _pinValue
+                # assertion on some server releases if we get here
+                # due to a socket timeout.
+                self.__killed = True
+                raise
+        else: # exhaust cursor - no getMore message
+            response = client._exhaust_next(self.__exhaust_mgr.sock)
 
         try:
             response = helpers._unpack_response(response, self.__id,
@@ -722,12 +802,12 @@ class Cursor(object):
             # Don't send kill cursors to another server after a "not master"
             # error. It's completely pointless.
             self.__killed = True
-            db.connection.disconnect()
+            client.disconnect()
             raise
         self.__id = response["cursor_id"]
 
         # starting from doesn't get set on getmore's for tailable cursors
-        if not self.__tailable:
+        if not (self.__query_flags & _QUERY_OPTIONS["tailable_cursor"]):
             assert response["starting_from"] == self.__retrieved, (
                 "Result batch started from %s, expected %s" % (
                     response['starting_from'], self.__retrieved))
@@ -737,6 +817,11 @@ class Cursor(object):
 
         if self.__limit and self.__id and self.__limit <= self.__retrieved:
             self.__die()
+
+        # Don't wait for garbage collection to call __del__, return the
+        # socket to the pool now.
+        if self.__exhaust and self.__id == 0:
+            self.__exhaust_mgr.close()
 
     def _refresh(self):
         """Refreshes the cursor with more data from Mongo.
@@ -771,9 +856,14 @@ class Cursor(object):
             else:
                 limit = self.__batch_size
 
-            self.__send_message(
-                message.get_more(self.__collection.full_name,
-                                 limit, self.__id))
+            # Exhaust cursors don't send getMore messages.
+            if self.__exhaust:
+                self.__send_message(None)
+            else:
+                self.__send_message(
+                    message.get_more(self.__collection.full_name,
+                                     limit, self.__id))
+
         else:  # Cursor id is zero nothing else to return
             self.__killed = True
 

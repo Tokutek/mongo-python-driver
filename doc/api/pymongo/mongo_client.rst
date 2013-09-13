@@ -26,6 +26,7 @@
       .. autoattribute:: document_class
       .. autoattribute:: tz_aware
       .. autoattribute:: max_bson_size
+      .. autoattribute:: max_message_size
       .. autoattribute:: read_preference
       .. autoattribute:: tag_sets
       .. autoattribute:: secondary_acceptable_latency_ms
@@ -34,6 +35,7 @@
       .. automethod:: database_names
       .. automethod:: drop_database
       .. automethod:: copy_database(from_name, to_name[, from_host=None[, username=None[, password=None]]])
+      .. automethod:: get_default_database
       .. automethod:: server_info
       .. automethod:: start_request
       .. automethod:: end_request

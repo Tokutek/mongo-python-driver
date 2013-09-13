@@ -131,12 +131,16 @@ class Pool:
             "certification authority" certificates, which are used to validate
             certificates passed from the other end of the connection.
             Implies ``ssl=True``.
-          - `wait_queue_timeout`: (integer) How long (in milliseconds) a
+          - `wait_queue_timeout`: (integer) How long (in seconds) a
             thread will wait for a socket from the pool if the pool has no
             free sockets.
           - `wait_queue_multiple`: (integer) Multiplied by max_pool_size to give
             the number of threads allowed to wait for a socket at one time.
         """
+        # Only check a socket's health with _closed() every once in a while.
+        # Can override for testing: 0 to always check, None to never check.
+        self._check_interval_seconds = 1
+
         if use_greenlets and not thread_util.have_gevent:
             raise ConfigurationError(
                 "The Gevent module is not available. "
@@ -173,7 +177,7 @@ class Pool:
         # Count the number of calls to start_request() per thread or greenlet
         self._request_counter = thread_util.Counter(use_greenlets)
 
-        if self.wait_queue_multiple is None:
+        if self.wait_queue_multiple is None or self.max_size is None:
             max_waiters = None
         else:
             max_waiters = self.max_size * self.wait_queue_multiple
@@ -301,7 +305,7 @@ class Pool:
         req_state = self._get_request_state()
         if req_state not in (NO_SOCKET_YET, NO_REQUEST):
             # There's a socket for this request, check it and return it
-            checked_sock = self._check(req_state, pair, acquire_on_connect=True)
+            checked_sock = self._check(req_state, pair)
             if checked_sock != req_state:
                 self._set_request_state(checked_sock)
 
@@ -383,8 +387,8 @@ class Pool:
     def maybe_return_socket(self, sock_info):
         """Return the socket to the pool unless it's the request socket.
         """
-        if sock_info in (NO_REQUEST, NO_SOCKET_YET):
-            return
+        # These sentinel values should only be used internally.
+        assert sock_info not in (NO_REQUEST, NO_SOCKET_YET)
 
         if self.pid != os.getpid():
             if not sock_info.forced:
@@ -394,7 +398,7 @@ class Pool:
             if sock_info.closed:
                 if sock_info.forced:
                     sock_info.forced = False
-                else:
+                elif sock_info != self._get_request_state():
                     self._socket_semaphore.release()
                 return
 
@@ -406,8 +410,10 @@ class Pool:
         """
         try:
             self.lock.acquire()
-            if (len(self.sockets) < self.max_size
-                    and sock_info.pool_id == self.pool_id):
+            too_many_sockets = (self.max_size is not None
+                                and len(self.sockets) >= self.max_size)
+
+            if not too_many_sockets and sock_info.pool_id == self.pool_id:
                 self.sockets.add(sock_info)
             else:
                 sock_info.close()
@@ -419,7 +425,7 @@ class Pool:
         else:
             self._socket_semaphore.release()
 
-    def _check(self, sock_info, pair, acquire_on_connect=False):
+    def _check(self, sock_info, pair):
         """This side-effecty function checks if this pool has been reset since
         the last time this socket was used, or if the socket has been closed by
         some external network error, and if so, attempts to create a new socket.
@@ -434,6 +440,9 @@ class Pool:
         """
         error = False
 
+        # How long since socket was last checked out.
+        age = time.time() - sock_info.last_checkout
+
         if sock_info.closed:
             error = True
 
@@ -441,7 +450,10 @@ class Pool:
             sock_info.close()
             error = True
 
-        elif time.time() - sock_info.last_checkout > 1:
+        elif (self._check_interval_seconds is not None
+                and (
+                    0 == self._check_interval_seconds
+                    or age > self._check_interval_seconds)):
             if _closed(sock_info.sock):
                 sock_info.close()
                 error = True
@@ -450,10 +462,6 @@ class Pool:
             return sock_info
         else:
             try:
-                if acquire_on_connect:
-                    if not self._socket_semaphore.acquire(
-                            True, self.wait_queue_timeout):
-                        self._raise_wait_queue_timeout()
                 return self.connect(pair)
             except socket.error:
                 self.reset()

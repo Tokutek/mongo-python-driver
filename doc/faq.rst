@@ -15,15 +15,65 @@ How does connection pooling work in PyMongo?
 --------------------------------------------
 
 Every :class:`~pymongo.mongo_client.MongoClient` instance has a built-in
-connection pool. The pool begins with one open connection. Note that
-:attr:`~pymongo.mongo_client.MongoClient.max_pool_size` does not cap the number
-of connections; it only caps the number of idle connections kept open in
-the pool for future use. Thus, if 500 threads simultaneously launch long-running
-queries, PyMongo opens up to 500 connections to MongoDB, then closes all but
-``max_pool_size`` of them as the queries complete.
+connection pool. The pool begins with one open connection. If necessary to
+support concurrent access to MongoDB from multiple threads in your application,
+the client opens new connections on demand.
+
+By default, there is no thread-affinity for connections.
+
+In versions before 2.6, the default ``max_pool_size`` was 10, and it did not
+actually bound the number of open connections; it only determined the number
+of connections that would be kept open when no longer in use.
+
+Starting with PyMongo 2.6, the size of the connection pool is capped at
+``max_pool_size``, which now defaults to 100. When a thread in your application
+begins an operation on MongoDB, if all other connections are in use and the
+pool has reached its maximum, the thread pauses, waiting for a connection to
+be returned to the pool by another thread.
+
+The default configuration for a :class:`~pymongo.mongo_client.MongoClient`
+works for most applications::
+
+    client = MongoClient(host, port)
+
+Create this client **once** when your program starts up, and reuse it for all
+operations. It is a common mistake to create a new client for each request,
+which is very inefficient.
+
+To support extremely high numbers of concurrent MongoDB operations within one
+process, increase ``max_pool_size``::
+
+    client = MongoClient(host, port, max_pool_size=200)
+
+... or make it unbounded::
+
+    client = MongoClient(host, port, max_pool_size=None)
+
+By default, any number of threads are allowed to wait for connections to become
+available, and they can wait any length of time. Override ``waitQueueMultiple``
+to cap the number of waiting threads. E.g., to keep the number of waiters less
+than or equal to 500::
+
+    client = MongoClient(host, port, max_pool_size=50, waitQueueMultiple=10)
+
+When 500 threads are waiting for a socket, the 501st that needs a connection
+raises :exc:`~pymongo.errors.ExceededMaxWaiters`. Use this option to
+bound the amount of queueing in your application during a load spike, at the
+cost of additional exceptions.
+
+Once the pool reaches its max size, additional threads are allowed to wait
+indefinitely for connections to become available, unless you set
+``waitQueueTimeoutMS``::
+
+    client = MongoClient(host, port, waitQueueTimeoutMS=100)
+
+A thread that waits more than 100ms (in this example) for a connection raises
+:exc:`~pymongo.errors.ConnectionFailure`. Use this option if it is more
+important to bound the duration of operations during a load spike than it is to
+complete every operation.
 
 When :meth:`~pymongo.mongo_client.MongoClient.disconnect` is called by any thread,
-all sockets are closed. PyMongo will create new sockets as needed.
+all sockets are closed.
 
 :class:`~pymongo.mongo_replica_set_client.MongoReplicaSetClient` maintains one
 connection pool per server in your replica set.
@@ -181,12 +231,11 @@ How can I use PyMongo from Django?
 framework. Django includes an ORM, :mod:`django.db`. Currently,
 there's no official MongoDB backend for Django.
 
-`django-mongodb-engine <http://django-mongodb.org/>`_
-is an unofficial, actively developed MongoDB backend that supports Django
-aggregations, (atomic) updates, embedded objects, Map/Reduce and GridFS.
-It allows you to use most of Django's built-in features, including the
-ORM, admin, authentication, site and session frameworks and caching through
-`django-mongodb-cache <http://github.com/django-mongodb-engine/mongodb-cache>`_.
+`django-mongodb-engine <https://django-mongodb-engine.readthedocs.org/>`_
+is an unofficial MongoDB backend that supports Django aggregations, (atomic)
+updates, embedded objects, Map/Reduce and GridFS. It allows you to use most
+of Django's built-in features, including the ORM, admin, authentication, site
+and session frameworks and caching.
 
 However, it's easy to use MongoDB (and PyMongo) from Django
 without using a Django backend. Certain features of Django that require
@@ -291,44 +340,3 @@ just that field::
 
   >>> cur = coll.find({}, fields={'dt': False})
 
-.. _use_kerberos:
-
-How do I use Kerberos authentication with PyMongo?
---------------------------------------------------
-
-GSSAPI (Kerberos) authentication is available in the subscriber edition of
-MongoDB, version 2.4 and newer. To authenticate using GSSAPI you must first
-install the python `kerberos module`_ using easy_install or pip. Make sure
-you run kinit before using the following authentication methods::
-
-  $ kinit mongodbuser@EXAMPLE.COM
-  mongodbuser@EXAMPLE.COM's Password: 
-  $ klist
-  Credentials cache: FILE:/tmp/krb5cc_1000
-          Principal: mongodbuser@EXAMPLE.COM
-
-    Issued                Expires               Principal
-  Feb  9 13:48:51 2013  Feb  9 23:48:51 2013  krbtgt/EXAMPLE.COM@EXAMPLE.COM
-
-Now authenticate using the MongoDB URI::
-
-  >>> # Note: the kerberos principal must be url encoded.
-  >>> import pymongo
-  >>> uri = "mongodb://mongodbuser%40EXAMPLE.COM@example.com/?authMechanism=GSSAPI"
-  >>> client = pymongo.MongoClient(uri)
-  >>>
-
-or using :meth:`~pymongo.database.Database.authenticate`::
-
-  >>> import pymongo
-  >>> client = pymongo.MongoClient('example.com')
-  >>> db = client.test
-  >>> db.authenticate('mongodbuser@EXAMPLE.COM', mechanism='GSSAPI')
-  True
-
-.. note::
-   Kerberos support is only provided in environments supported by the python
-   `kerberos module`_. This currently limits support to CPython 2.x and Unix
-   environments.
-
-.. _kerberos module: http://pypi.python.org/pypi/kerberos

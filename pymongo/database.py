@@ -70,7 +70,8 @@ class Database(common.BaseObject):
             raise TypeError("name must be an instance "
                             "of %s" % (basestring.__name__,))
 
-        _check_name(name)
+        if name != '$external':
+            _check_name(name)
 
         self.__name = unicode(name)
         self.__connection = connection
@@ -332,6 +333,8 @@ class Database(common.BaseObject):
           - `**kwargs` (optional): additional keyword arguments will
             be added to the command document before it is sent
 
+        .. note:: ``command`` ignores the ``network_timeout`` parameter.
+
         .. versionchanged:: 2.3
            Added `tag_sets` and `secondary_acceptable_latency_ms` options.
         .. versionchanged:: 2.2
@@ -394,14 +397,19 @@ class Database(common.BaseObject):
 
         return result
 
-    def collection_names(self):
+    def collection_names(self, include_system_collections=True):
         """Get a list of all the collection names in this database.
+
+        :Parameters:
+          - `include_system_collections` (optional): if ``False`` list
+            will not include system collections (e.g ``system.indexes``)
         """
         results = self["system.namespaces"].find(_must_use_master=True)
         names = [r["name"] for r in results]
         names = [n[len(self.__name) + 1:] for n in names
-                 if n.startswith(self.__name + ".")]
-        names = [n for n in names if "$" not in n]
+                 if n.startswith(self.__name + ".") and "$" not in n]
+        if not include_system_collections:
+            names = [n for n in names if not n.startswith("system.")]
         return names
 
     def drop_collection(self, name_or_collection):
@@ -666,45 +674,46 @@ class Database(common.BaseObject):
         self.system.users.remove({"user": name}, **self._get_wc_override())
 
     def authenticate(self, name, password=None,
-                     source=None, mechanism='MONGODB-CR'):
+                     source=None, mechanism='MONGODB-CR', **kwargs):
         """Authenticate to use this database.
 
-        Raises :class:`TypeError` if either `name` or `password` is not
-        an instance of :class:`basestring` (:class:`str` in python 3).
         Authentication lasts for the life of the underlying client
         instance, or until :meth:`logout` is called.
 
-        The "admin" database is special. Authenticating on "admin"
-        gives access to *all* databases. Effectively, "admin" access
-        means root access to the database.
+        Raises :class:`TypeError` if (required) `name`, (optional) `password`,
+        or (optional) `source` is not an instance of :class:`basestring`
+        (:class:`str` in python 3).
 
         .. note::
-          This method authenticates the current connection, and
-          will also cause all new :class:`~socket.socket` connections
-          in the underlying client instance to be authenticated automatically.
+          - This method authenticates the current connection, and
+            will also cause all new :class:`~socket.socket` connections
+            in the underlying client instance to be authenticated automatically.
 
-         - Authenticating more than once on the same database with different
-           credentials is not supported. You must call :meth:`logout` before
-           authenticating with new credentials.
+          - Authenticating more than once on the same database with different
+            credentials is not supported. You must call :meth:`logout` before
+            authenticating with new credentials.
 
-         - When sharing a client instance between multiple threads, all
-           threads will share the authentication. If you need different
-           authentication profiles for different purposes you must use
-           distinct client instances.
+          - When sharing a client instance between multiple threads, all
+            threads will share the authentication. If you need different
+            authentication profiles for different purposes you must use
+            distinct client instances.
 
-         - To get authentication to apply immediately to all
-           existing sockets you may need to reset this client instance's
-           sockets using :meth:`~pymongo.mongo_client.MongoClient.disconnect`.
+          - To get authentication to apply immediately to all
+            existing sockets you may need to reset this client instance's
+            sockets using :meth:`~pymongo.mongo_client.MongoClient.disconnect`.
 
         :Parameters:
           - `name`: the name of the user to authenticate.
           - `password` (optional): the password of the user to authenticate.
-            Not used with GSSAPI authentication.
+            Not used with GSSAPI or MONGODB-X509 authentication.
           - `source` (optional): the database to authenticate on. If not
             specified the current database is used.
           - `mechanism` (optional): See
             :data:`~pymongo.auth.MECHANISMS` for options.
             Defaults to MONGODB-CR (MongoDB Challenge Response protocol)
+          - `gssapiServiceName` (optional): Used with the GSSAPI mechanism
+            to specify the service name portion of the service principal name.
+            Defaults to 'mongodb'.
 
         .. versionchanged:: 2.5
            Added the `source` and `mechanism` parameters. :meth:`authenticate`
@@ -725,8 +734,15 @@ class Database(common.BaseObject):
                             "of %s" % (basestring.__name__,))
         common.validate_auth_mechanism('mechanism', mechanism)
 
-        credentials = (source or self.name, unicode(name),
-                       password and unicode(password) or None, mechanism)
+        validated_options = {}
+        for option, value in kwargs.iteritems():
+            normalized, val = common.validate_auth_option(option, value)
+            validated_options[normalized] = val
+
+        credentials = auth._build_credentials_tuple(mechanism,
+                                source or self.name, unicode(name),
+                                password and unicode(password) or None,
+                                validated_options)
         self.connection._cache_credentials(self.name, credentials)
         return True
 
