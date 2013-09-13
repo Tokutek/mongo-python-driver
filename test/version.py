@@ -51,5 +51,13 @@ def version(client):
     return _parse_version_string(client.server_info()["version"])
 
 
+def tokumx_version(client):
+    return _parse_version_string(client.server_info()["tokumxVersion"])
+
+
 def at_least(client, min_version):
     return version(client) >= tuple(_padded(min_version, 4))
+
+
+def tokumx_at_least(client, min_version):
+    return tokumx_version(client) >= tuple(_padded(min_version, 4))

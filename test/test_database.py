@@ -728,7 +728,7 @@ class TestDatabase(unittest.TestCase):
         self.assertRaises(OperationFailure, db.system_js.non_existant)
 
         # XXX: Broken in V8, works in SpiderMonkey
-        if not version.at_least(db.connection, (2, 3, 0)):
+        if not version.tokumx_at_least(db.connection, (1, 3, 0)):
             db.system_js.no_param = Code("return 5;")
             self.assertEqual(5, db.system_js.no_param())
 
