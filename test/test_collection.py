@@ -1702,7 +1702,7 @@ class TestCollection(unittest.TestCase):
         # Test that inserts fail after first error, acknowledged.
         self.db.test.drop()
         self.assertRaises(DuplicateKeyError, self.db.test.insert, batch, w=1)
-        if is_mongos(self.db.connection):
+        if version.tokumx_at_least(self.db.connection, (1, 2, 9999)) and is_mongos(self.db.connection):
             # v2.4 changes to mongos changed this behavior to be explicitly
             # what vanilla mongos provides, which is that you get some
             # documents inserted.  That's not weaker than the guarantee we
@@ -1716,7 +1716,7 @@ class TestCollection(unittest.TestCase):
         # Test that inserts fail after first error, unacknowledged.
         self.db.test.drop()
         self.assertTrue(self.db.test.insert(batch, w=0))
-        if is_mongos(self.db.connection):
+        if version.tokumx_at_least(self.db.connection, (1, 2, 9999)) and is_mongos(self.db.connection):
             self.assertEqual(1, self.db.test.count())
         else:
             self.assertEqual(0, self.db.test.count())
@@ -1732,7 +1732,7 @@ class TestCollection(unittest.TestCase):
             pass #self.assertTrue(str(batch[2]['_id']) in str(e))
         else:
             self.fail('OperationFailure not raised.')
-        if is_mongos(self.db.connection):
+        if version.tokumx_at_least(self.db.connection, (1, 2, 9999)) and is_mongos(self.db.connection):
             # Only the first and third documents should be inserted.
             self.assertEqual(2, self.db.test.count())
         else:
@@ -1741,7 +1741,7 @@ class TestCollection(unittest.TestCase):
         # 2 batches, 2 errors, unacknowledged, continue on error
         self.db.test.drop()
         self.assertTrue(self.db.test.insert(batch, continue_on_error=True, w=0))
-        if is_mongos(self.db.connection):
+        if version.tokumx_at_least(self.db.connection, (1, 2, 9999)) and is_mongos(self.db.connection):
             # Only the first and third documents should be inserted.
             self.assertEqual(2, self.db.test.count())
         else:
