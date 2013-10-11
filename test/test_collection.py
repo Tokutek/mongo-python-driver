@@ -1702,13 +1702,24 @@ class TestCollection(unittest.TestCase):
         # Test that inserts fail after first error, acknowledged.
         self.db.test.drop()
         self.assertRaises(DuplicateKeyError, self.db.test.insert, batch, w=1)
-        # With transactions, this should actually be 0, not 1.
-        self.assertEqual(0, self.db.test.count())
+        if is_mongos(self.db.connection):
+            # v2.4 changes to mongos changed this behavior to be explicitly
+            # what vanilla mongos provides, which is that you get some
+            # documents inserted.  That's not weaker than the guarantee we
+            # provide, but it's different and maybe we should do something
+            # smarter than it.  TODO: figure this out
+            self.assertEqual(1, self.db.test.count())
+        else:
+            # With transactions, this should actually be 0, not 1.
+            self.assertEqual(0, self.db.test.count())
 
         # Test that inserts fail after first error, unacknowledged.
         self.db.test.drop()
         self.assertTrue(self.db.test.insert(batch, w=0))
-        self.assertEqual(0, self.db.test.count())
+        if is_mongos(self.db.connection):
+            self.assertEqual(1, self.db.test.count())
+        else:
+            self.assertEqual(0, self.db.test.count())
 
         # 2 batches, 2 errors, acknowledged, continue on error
         self.db.test.drop()
@@ -1721,14 +1732,20 @@ class TestCollection(unittest.TestCase):
             pass #self.assertTrue(str(batch[2]['_id']) in str(e))
         else:
             self.fail('OperationFailure not raised.')
-        # Only the first and third documents should be inserted.
-        self.assertEqual(0, self.db.test.count())
+        if is_mongos(self.db.connection):
+            # Only the first and third documents should be inserted.
+            self.assertEqual(2, self.db.test.count())
+        else:
+            self.assertEqual(0, self.db.test.count())
 
         # 2 batches, 2 errors, unacknowledged, continue on error
         self.db.test.drop()
         self.assertTrue(self.db.test.insert(batch, continue_on_error=True, w=0))
-        # Only the first and third documents should be inserted.
-        self.assertEqual(0, self.db.test.count())
+        if is_mongos(self.db.connection):
+            # Only the first and third documents should be inserted.
+            self.assertEqual(2, self.db.test.count())
+        else:
+            self.assertEqual(0, self.db.test.count())
 
     # Starting in PyMongo 2.6 we no longer use message.insert for inserts, but
     # message.insert is part of the public API. Do minimal testing here; there
