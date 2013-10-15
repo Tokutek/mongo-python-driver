@@ -398,6 +398,8 @@ class TestCollection(unittest.TestCase):
     def test_index_text(self):
         if not version.at_least(self.client, (2, 3, 2)):
             raise SkipTest("Text search requires server >=2.3.2.")
+        if not version.tokumx_at_least(self.client, (2,)):
+            raise SkipTest("Text search is not yet in tokumx.")
 
         if is_mongos(self.client):
             raise SkipTest("setParameter does not work through mongos")
@@ -414,6 +416,8 @@ class TestCollection(unittest.TestCase):
     def test_index_2dsphere(self):
         if not version.at_least(self.client, (2, 3, 2)):
             raise SkipTest("2dsphere indexing requires server >=2.3.2.")
+        if not version.tokumx_at_least(self.client, (2,)):
+            raise SkipTest("2dsphere indexing is not yet in tokumx.")
 
         db = self.db
         db.test.drop_indexes()

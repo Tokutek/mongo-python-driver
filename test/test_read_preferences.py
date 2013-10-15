@@ -347,7 +347,7 @@ class TestCommandAndReadPreference(TestReplicaSetClientBase):
             ])))
 
         # Text search.
-        if version.at_least(self.c, (2, 3, 2)):
+        if version.at_least(self.c, (2, 3, 2)) and version.tokumx_at_least(self.c, (2,)):
             utils.enable_text_search(self.c)
             db = self.c.pymongo_test
 
