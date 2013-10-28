@@ -350,7 +350,7 @@ class TestReplicaSetClient(TestReplicaSetClientBase, TestRequestMixin):
         self.assertEqual(1, db.test.count())
 
         # avoid a silly race in tokumx
-        time.sleep(1)
+        time.sleep(2)
         cursor = db.test.find()
         doc = cursor.next()
         self.assertEqual('x', doc['foo'])

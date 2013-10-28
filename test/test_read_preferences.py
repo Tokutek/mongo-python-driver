@@ -16,6 +16,7 @@
 import random
 
 import sys
+import time
 import unittest
 
 from nose.plugins.skip import SkipTest
@@ -294,6 +295,7 @@ class TestCommandAndReadPreference(TestReplicaSetClientBase):
 
         # collStats fails if no collection
         self.c.pymongo_test.test.insert({}, w=self.w)
+        time.sleep(1)  # wait for slaves to apply
         self._test_fn(True, lambda: self.c.pymongo_test.command(
             'collStats', 'test'))
 
