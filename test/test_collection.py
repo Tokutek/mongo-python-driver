@@ -1460,6 +1460,8 @@ class TestCollection(unittest.TestCase):
 
     # doesn't really test functionality, just that the option is set correctly
     def test_snapshot(self):
+        if version.tokumx_at_least(self.db.connection, (1, 3, 9999)):
+            raise SkipTest("TokuMX > 1.3.x ignores $snapshot")
         db = self.db
 
         self.assertRaises(TypeError, db.test.find, snapshot=5)
