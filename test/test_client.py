@@ -609,16 +609,17 @@ class TestClient(unittest.TestCase, TestRequestMixin):
         if sys.platform not in ('cygwin', 'win32'):
             c.fsync(async=True)
             self.assertFalse(c.is_locked)
-        c.fsync(lock=True)
-        self.assertTrue(c.is_locked)
-        locked = True
-        c.unlock()
-        for _ in xrange(5):
-            locked = c.is_locked
-            if not locked:
-                break
-            time.sleep(1)
-        self.assertFalse(locked)
+        if not version.tokumx_at_least(c, (1,3,9999)):
+            c.fsync(lock=True)
+            self.assertTrue(c.is_locked)
+            locked = True
+            c.unlock()
+            for _ in xrange(5):
+                locked = c.is_locked
+                if not locked:
+                    break
+                time.sleep(1)
+            self.assertFalse(locked)
 
     def test_contextlib(self):
         if sys.version_info < (2, 6):
