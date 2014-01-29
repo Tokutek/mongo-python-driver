@@ -28,7 +28,7 @@ from pymongo.cursor import _QUERY_OPTIONS
 from pymongo.mongo_replica_set_client import MongoReplicaSetClient
 from pymongo.read_preferences import (ReadPreference, modes, MovingAverage,
                                       secondary_ok_commands)
-from pymongo.errors import ConfigurationError
+from pymongo.errors import ConfigurationError, OperationFailure
 
 from test.test_replica_set_client import TestReplicaSetClientBase
 from test.test_client import get_client
