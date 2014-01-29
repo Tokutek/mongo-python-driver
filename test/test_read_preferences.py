@@ -449,9 +449,16 @@ class TestCommandAndReadPreference(TestReplicaSetClientBase):
         self._test_fn(True, lambda: self.c.pymongo_test.test.find().count())
 
     def test_distinct(self):
-        self._test_fn(True, lambda: self.c.pymongo_test.test.distinct('a'))
-        self._test_fn(True,
-            lambda: self.c.pymongo_test.test.find().distinct('a'))
+        while True:
+            try:
+                self._test_fn(True, lambda: self.c.pymongo_test.test.distinct('a'))
+                self._test_fn(True,
+                              lambda: self.c.pymongo_test.test.find().distinct('a'))
+            except OperationFailure as e:
+                if e.code == 16759:  # lock not granted
+                    continue
+                else:
+                    raise
 
     def test_aggregate(self):
         if version.at_least(self.c, (2, 1, 0)):
