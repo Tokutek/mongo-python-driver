@@ -296,7 +296,7 @@ class TestCommandAndReadPreference(TestReplicaSetClientBase):
         _decorated.__dict__.update(fn.__dict__)
         return _decorated
 
-    @retry_lock_not_granted
+    @retry_lock_not_granted_errors
     def test_command(self):
         # Test generic 'command' method. Some commands obey read preference,
         # most don't.
@@ -462,12 +462,12 @@ class TestCommandAndReadPreference(TestReplicaSetClientBase):
         self._test_fn(True, lambda: self.c.pymongo_test.test.inline_map_reduce(
             'function() { }', 'function() { }', full_response=True))
 
-    @retry_lock_not_granted
+    @retry_lock_not_granted_errors
     def test_count(self):
         self._test_fn(True, lambda: self.c.pymongo_test.test.count())
         self._test_fn(True, lambda: self.c.pymongo_test.test.find().count())
 
-    @retry_lock_not_granted
+    @retry_lock_not_granted_errors
     def test_distinct(self):
         self._test_fn(True, lambda: self.c.pymongo_test.test.distinct('a'))
         self._test_fn(True,
