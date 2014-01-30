@@ -279,7 +279,7 @@ class TestCommandAndReadPreference(TestReplicaSetClientBase):
                                 "Some members not used for NEAREST: %s" % (
                                     unused))
 
-    @classmethod
+    @staticmethod
     def retry_lock_not_granted_errors(fn):
         def _decorated(self):
             i = 0
