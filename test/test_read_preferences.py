@@ -279,6 +279,24 @@ class TestCommandAndReadPreference(TestReplicaSetClientBase):
                                 "Some members not used for NEAREST: %s" % (
                                     unused))
 
+    @classmethod
+    def retry_lock_not_granted_errors(fn):
+        def _decorated(self):
+            i = 0
+            while True:
+                try:
+                    return fn(self)
+                except OperationFailure as e:
+                    i += 1
+                    if e.code == 16759 and i < 30:  # lock not granted
+                        continue
+                    raise
+        _decorated.__name__ = fn.__name__
+        _decorated.__doc__ = fn.__doc__
+        _decorated.__dict__.update(fn.__dict__)
+        return _decorated
+
+    @retry_lock_not_granted
     def test_command(self):
         # Test generic 'command' method. Some commands obey read preference,
         # most don't.
@@ -444,23 +462,16 @@ class TestCommandAndReadPreference(TestReplicaSetClientBase):
         self._test_fn(True, lambda: self.c.pymongo_test.test.inline_map_reduce(
             'function() { }', 'function() { }', full_response=True))
 
+    @retry_lock_not_granted
     def test_count(self):
         self._test_fn(True, lambda: self.c.pymongo_test.test.count())
         self._test_fn(True, lambda: self.c.pymongo_test.test.find().count())
 
+    @retry_lock_not_granted
     def test_distinct(self):
-        i = 0;
-        while True:
-            try:
-                self._test_fn(True, lambda: self.c.pymongo_test.test.distinct('a'))
-                self._test_fn(True,
-                              lambda: self.c.pymongo_test.test.find().distinct('a'))
-                break
-            except OperationFailure as e:
-                i += 1
-                if e.code == 16759 and i < 30:  # lock not granted
-                    continue
-                raise
+        self._test_fn(True, lambda: self.c.pymongo_test.test.distinct('a'))
+        self._test_fn(True,
+                      lambda: self.c.pymongo_test.test.find().distinct('a'))
 
     def test_aggregate(self):
         if version.at_least(self.c, (2, 1, 0)):
