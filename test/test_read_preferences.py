@@ -36,6 +36,22 @@ from test import version, utils, host, port
 from nose.plugins.skip import SkipTest
 
 
+def retry_lock_not_granted_errors(fn):
+    def _decorated(self):
+        i = 0
+        while True:
+            try:
+                return fn(self)
+            except OperationFailure as e:
+                i += 1
+                if e.code == 16759 and i < 30:  # lock not granted
+                    continue
+                raise
+    _decorated.__name__ = fn.__name__
+    _decorated.__doc__ = fn.__doc__
+    _decorated.__dict__.update(fn.__dict__)
+    return _decorated
+
 class TestReadPreferencesBase(TestReplicaSetClientBase):
     def setUp(self):
         super(TestReadPreferencesBase, self).setUp()
@@ -278,23 +294,6 @@ class TestCommandAndReadPreference(TestReplicaSetClientBase):
                             self.fail(
                                 "Some members not used for NEAREST: %s" % (
                                     unused))
-
-    @staticmethod
-    def retry_lock_not_granted_errors(fn):
-        def _decorated(self):
-            i = 0
-            while True:
-                try:
-                    return fn(self)
-                except OperationFailure as e:
-                    i += 1
-                    if e.code == 16759 and i < 30:  # lock not granted
-                        continue
-                    raise
-        _decorated.__name__ = fn.__name__
-        _decorated.__doc__ = fn.__doc__
-        _decorated.__dict__.update(fn.__dict__)
-        return _decorated
 
     @retry_lock_not_granted_errors
     def test_command(self):
