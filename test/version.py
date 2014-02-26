@@ -15,6 +15,8 @@
 """Some tools for running tests based on MongoDB server version."""
 
 
+import re
+
 def _padded(iter, length, padding=0):
     l = list(iter)
     if len(l) < length:
@@ -22,6 +24,8 @@ def _padded(iter, length, padding=0):
             l.append(0)
     return l
 
+
+suffix_re = re.compile(r'([-+])[a-z]+\.([0-9]+)$')
 
 def _parse_version_string(version_string):
     mod = 0
@@ -38,6 +42,15 @@ def _parse_version_string(version_string):
     if version_string.find('-rc') != -1:
         version_string = version_string[0:version_string.find('-rc')]
         mod = -1
+
+    # deal with things like '+hotfix.N'
+    m = suffix_re.search(version_string)
+    if m:
+        version_string = version_string[0:m.start()]
+        if m.group(1) == '-':
+            mod = -1
+        else:
+            mod = int(m.group(2)) + 1
 
     version = [int(part) for part in version_string.split(".")]
     version = _padded(version, 3)
