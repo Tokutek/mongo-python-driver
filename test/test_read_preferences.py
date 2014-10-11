@@ -344,20 +344,18 @@ class TestCommandAndReadPreference(TestReplicaSetClientBase):
             ('name', 'location_geoHaystack'),
         ]), w=self.w)
 
-        if False:
-            # geo disabled for TokuMX
-            self._test_fn(True, lambda: self.c.pymongo_test.command(
-                'geoNear', 'test', near=[0, 0]))
-            self._test_fn(True, lambda: self.c.pymongo_test.command(SON([
-                ('geoNear', 'test'), ('near', [0, 0])])))
+        self._test_fn(True, lambda: self.c.pymongo_test.command(
+            'geoNear', 'test', near=[0, 0]))
+        self._test_fn(True, lambda: self.c.pymongo_test.command(SON([
+            ('geoNear', 'test'), ('near', [0, 0])])))
 
-            self._test_fn(True, lambda: self.c.pymongo_test.command(
-                'geoSearch', 'test', near=[33, 33], maxDistance=6,
-                search={'type': 'restaurant' }, limit=30))
+        self._test_fn(True, lambda: self.c.pymongo_test.command(
+            'geoSearch', 'test', near=[33, 33], maxDistance=6,
+            search={'type': 'restaurant' }, limit=30))
 
-            self._test_fn(True, lambda: self.c.pymongo_test.command(SON([
-                ('geoSearch', 'test'), ('near', [33, 33]), ('maxDistance', 6),
-                ('search', {'type': 'restaurant'}), ('limit', 30)])))
+        self._test_fn(True, lambda: self.c.pymongo_test.command(SON([
+            ('geoSearch', 'test'), ('near', [33, 33]), ('maxDistance', 6),
+            ('search', {'type': 'restaurant'}), ('limit', 30)])))
 
         if version.at_least(self.c, (2, 1, 0)):
             self._test_fn(True, lambda: self.c.pymongo_test.command(SON([
@@ -366,7 +364,7 @@ class TestCommandAndReadPreference(TestReplicaSetClientBase):
             ])))
 
         # Text search.
-        if version.at_least(self.c, (2, 3, 2)) and version.tokumx_at_least(self.c, (2,)):
+        if version.at_least(self.c, (2, 3, 2)) and version.tokumx_at_least(self.c, (2, 1)):
             utils.enable_text_search(self.c)
             db = self.c.pymongo_test
 
