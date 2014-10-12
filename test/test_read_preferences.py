@@ -332,30 +332,31 @@ class TestCommandAndReadPreference(TestReplicaSetClientBase):
         self._test_fn(True, lambda: self.c.pymongo_test.command(SON([
             ('distinct', 'test'), ('key', {'a': 1}), ('query', {'a': 1})])))
 
-        # Geo stuff. Make sure a 2d index is created and replicated
-        self.c.pymongo_test.system.indexes.insert({
-            'key' : { 'location' : '2d' }, 'ns' : 'pymongo_test.test',
-            'name' : 'location_2d' }, w=self.w)
+        if version.tokumx_at_least(self.db.connection, (2,)) and not version.tokumx_at_least(self.db.connection, (2, 1)):
+            # Geo stuff. Make sure a 2d index is created and replicated
+            self.c.pymongo_test.system.indexes.insert({
+                'key' : { 'location' : '2d' }, 'ns' : 'pymongo_test.test',
+                'name' : 'location_2d' }, w=self.w)
 
-        self.c.pymongo_test.system.indexes.insert(SON([
-            ('ns', 'pymongo_test.test'),
-            ('key', SON([('location', 'geoHaystack'), ('key', 1)])),
-            ('bucketSize', 100),
-            ('name', 'location_geoHaystack'),
-        ]), w=self.w)
+            self.c.pymongo_test.system.indexes.insert(SON([
+                ('ns', 'pymongo_test.test'),
+                ('key', SON([('location', 'geoHaystack'), ('key', 1)])),
+                ('bucketSize', 100),
+                ('name', 'location_geoHaystack'),
+            ]), w=self.w)
 
-        self._test_fn(True, lambda: self.c.pymongo_test.command(
-            'geoNear', 'test', near=[0, 0]))
-        self._test_fn(True, lambda: self.c.pymongo_test.command(SON([
-            ('geoNear', 'test'), ('near', [0, 0])])))
+            self._test_fn(True, lambda: self.c.pymongo_test.command(
+                'geoNear', 'test', near=[0, 0]))
+            self._test_fn(True, lambda: self.c.pymongo_test.command(SON([
+                ('geoNear', 'test'), ('near', [0, 0])])))
 
-        self._test_fn(True, lambda: self.c.pymongo_test.command(
-            'geoSearch', 'test', near=[33, 33], maxDistance=6,
-            search={'type': 'restaurant' }, limit=30))
+            self._test_fn(True, lambda: self.c.pymongo_test.command(
+                'geoSearch', 'test', near=[33, 33], maxDistance=6,
+                search={'type': 'restaurant' }, limit=30))
 
-        self._test_fn(True, lambda: self.c.pymongo_test.command(SON([
-            ('geoSearch', 'test'), ('near', [33, 33]), ('maxDistance', 6),
-            ('search', {'type': 'restaurant'}), ('limit', 30)])))
+            self._test_fn(True, lambda: self.c.pymongo_test.command(SON([
+                ('geoSearch', 'test'), ('near', [33, 33]), ('maxDistance', 6),
+                ('search', {'type': 'restaurant'}), ('limit', 30)])))
 
         if version.at_least(self.c, (2, 1, 0)):
             self._test_fn(True, lambda: self.c.pymongo_test.command(SON([
@@ -364,7 +365,7 @@ class TestCommandAndReadPreference(TestReplicaSetClientBase):
             ])))
 
         # Text search.
-        if version.at_least(self.c, (2, 3, 2)) and version.tokumx_at_least(self.c, (2, 1)):
+        if version.at_least(self.c, (2, 3, 2)) and version.tokumx_at_least(self.c, (2, 2)):
             utils.enable_text_search(self.c)
             db = self.c.pymongo_test
 

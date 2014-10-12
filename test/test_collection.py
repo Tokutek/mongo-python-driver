@@ -359,8 +359,10 @@ class TestCollection(unittest.TestCase):
         self.assertEqual([('loc', '2d')], index_info['key'])
 
     def test_index_haystack(self):
-        if not version.tokumx_at_least((2,)):
+        if not version.tokumx_at_least(self.db.connection, (2,)):
             raise SkipTest("geoSearch not supported in TokuMX <2.0")
+        if version.tokumx_at_least(self.db.connection, (2, 1)):
+            raise SkipTest("geo not yet in TokuMX >2.0")
         if is_mongos(self.db.connection):
             raise SkipTest("geoSearch is not supported by mongos")
         db = self.db
@@ -399,7 +401,7 @@ class TestCollection(unittest.TestCase):
     def test_index_text(self):
         if not version.at_least(self.client, (2, 3, 2)):
             raise SkipTest("Text search requires server >=2.3.2.")
-        if not version.tokumx_at_least(self.client, (2, 1)):
+        if not version.tokumx_at_least(self.client, (2, 2)):
             raise SkipTest("Text search is not yet in tokumx.")
 
         if is_mongos(self.client):
@@ -419,6 +421,8 @@ class TestCollection(unittest.TestCase):
             raise SkipTest("2dsphere indexing requires server >=2.3.2.")
         if not version.tokumx_at_least(self.client, (2,)):
             raise SkipTest("2dsphere indexing is not yet in tokumx.")
+        if version.tokumx_at_least(self.db.connection, (2, 1)):
+            raise SkipTest("geo not yet in TokuMX >2.0")
 
         db = self.db
         db.test.drop_indexes()
