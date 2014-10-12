@@ -922,6 +922,7 @@ class TestBulkWriteConcern(BulkTestBase):
     def test_fsync_and_j(self):
         if not version.at_least(self.client, (1, 8, 2)):
             raise SkipTest("Need at least MongoDB 1.8.2")
+        raise SkipTest("TokuMX doesn't consider {fsync: 1, j: 1} an error")
         batch = self.coll.initialize_ordered_bulk_op()
         batch.insert({'a': 1})
         self.assertRaises(

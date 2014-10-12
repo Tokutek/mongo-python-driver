@@ -968,10 +968,18 @@ class TestCursor(unittest.TestCase):
             # have more than 3 documents. Just make sure
             # this doesn't raise...
             db.test.insert(({"x": i} for i in xrange(4, 7)))
-            self.assertEqual(0, len(list(cursor)))
 
-            # and that the cursor doesn't think it's still alive.
-            self.assertFalse(cursor.alive)
+            if False:
+                # Original test, in basic MongoDB a capped rollover kills
+                # the cursor:
+                self.assertEqual(0, len(list(cursor)))
+
+                # and that the cursor doesn't think it's still alive.
+                self.assertFalse(cursor.alive)
+            else:
+                # In TokuMX, we can still read:
+                self.assertEqual(3, len(list(cursor)))
+                self.assertTrue(cursor.alive)
 
             self.assertEqual(3, db.test.count())
         finally:

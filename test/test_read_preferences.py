@@ -338,7 +338,7 @@ class TestCommandAndReadPreference(TestReplicaSetClientBase):
         self._test_fn(True, lambda: self.c.pymongo_test.command(SON([
             ('distinct', 'test'), ('key', 'a'), ('query', {'a': 1})])))
 
-        if version.tokumx_at_least(self.db.connection, (2,)) and not version.tokumx_at_least(self.db.connection, (2, 1)):
+        if version.tokumx_at_least(self.c, (2,)) and not version.tokumx_at_least(self.c, (2, 0, 9999)):
             # Geo stuff. Make sure a 2d index is created and replicated
             self.c.pymongo_test.system.indexes.insert({
                 'key' : { 'location' : '2d' }, 'ns' : 'pymongo_test.test',

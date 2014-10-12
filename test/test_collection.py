@@ -375,7 +375,7 @@ class TestCollection(unittest.TestCase):
     def test_index_haystack(self):
         if not version.tokumx_at_least(self.db.connection, (2,)):
             raise SkipTest("geoSearch not supported in TokuMX <2.0")
-        if version.tokumx_at_least(self.db.connection, (2, 1)):
+        if version.tokumx_at_least(self.db.connection, (2, 0, 9999)):
             raise SkipTest("geo not yet in TokuMX >2.0")
         if is_mongos(self.db.connection):
             raise SkipTest("geoSearch is not supported by mongos")
@@ -452,7 +452,7 @@ class TestCollection(unittest.TestCase):
             raise SkipTest("2dsphere indexing requires server >=2.3.2.")
         if not version.tokumx_at_least(self.client, (2,)):
             raise SkipTest("2dsphere indexing is not yet in tokumx.")
-        if version.tokumx_at_least(self.db.connection, (2, 1)):
+        if version.tokumx_at_least(self.db.connection, (2, 0, 9999)):
             raise SkipTest("geo not yet in TokuMX >2.0")
 
         db = self.db
@@ -1362,9 +1362,10 @@ class TestCollection(unittest.TestCase):
                 self.fail("WTimeoutError was not raised")
 
         # can't use fsync and j options together
-        if version.at_least(self.client, (1, 8, 2)):
-            self.assertRaises(OperationFailure, self.db.test.insert,
-                              {"_id": 1}, j=True, fsync=True)
+        if False:  # raise SkipTest("TokuMX doesn't consider {fsync: 1, j: 1} an error")
+            if version.at_least(self.client, (1, 8, 2)):
+                self.assertRaises(OperationFailure, self.db.test.insert,
+                                  {"_id": 1}, j=True, fsync=True)
 
     def test_manual_last_error(self):
         self.db.test.save({"x": 1}, w=0)
