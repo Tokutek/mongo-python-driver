@@ -1,6 +1,89 @@
 Changelog
 =========
 
+Changes in Version 2.7.2
+------------------------
+
+Version 2.7.2 includes fixes for upsert reporting in the bulk API for MongoDB
+versions previous to 2.6, a regression in how son manipulators are applied in
+:meth:`~pymongo.collection.Collection.insert`, a few obscure connection pool
+semaphore leaks, and a few other minor issues. See the list of issues resolved
+for full details.
+
+Issues Resolved
+...............
+
+See the `PyMongo 2.7.2 release notes in JIRA`_ for the list of resolved issues
+in this release.
+
+.. _PyMongo 2.7.2 release notes in JIRA: https://jira.mongodb.org/browse/PYTHON/fixforversion/14005
+
+Changes in Version 2.7.1
+------------------------
+
+Version 2.7.1 fixes a number of issues reported since the release of 2.7,
+most importantly a fix for creating indexes and manipulating users through
+mongos versions older than 2.4.0.
+
+Issues Resolved
+...............
+
+See the `PyMongo 2.7.1 release notes in JIRA`_ for the list of resolved issues
+in this release.
+
+.. _PyMongo 2.7.1 release notes in JIRA: https://jira.mongodb.org/browse/PYTHON/fixforversion/13823
+
+Changes in Version 2.7
+----------------------
+
+PyMongo 2.7 is a major release with a large number of new features and bug
+fixes. Highlights include:
+
+- Full support for MongoDB 2.6.
+- A new :doc:`bulk write operations API </examples/bulk>`.
+- Support for server side query timeouts using
+  :meth:`~pymongo.cursor.Cursor.max_time_ms`.
+- Support for writing :meth:`~pymongo.collection.Collection.aggregate`
+  output to a collection.
+- A new :meth:`~pymongo.collection.Collection.parallel_scan` helper.
+- :class:`~pymongo.errors.OperationFailure` and its subclasses now include
+  a :attr:`~pymongo.errors.OperationFailure.details` attribute with complete
+  error details from the server.
+- A new GridFS :meth:`~gridfs.GridFS.find` method that returns a
+  :class:`~gridfs.grid_file.GridOutCursor`.
+- Greatly improved :doc:`support for mod_wsgi </examples/mod_wsgi>` when using
+  PyMongo's C extensions. Read `Jesse's blog post
+  <http://emptysqua.re/blog/python-c-extensions-and-mod-wsgi/>`_ for details.
+- Improved C extension support for ARM little endian.
+
+Breaking changes
+................
+
+Version 2.7 drops support for replica sets running MongoDB versions older
+than 1.6.2.
+
+Issues Resolved
+...............
+
+See the `PyMongo 2.7 release notes in JIRA`_ for the list of resolved issues
+in this release.
+
+.. _PyMongo 2.7 release notes in JIRA: https://jira.mongodb.org/browse/PYTHON/fixforversion/12892
+
+Changes in Version 2.6.3
+------------------------
+
+Version 2.6.3 fixes issues reported since the release of 2.6.2, most
+importantly a semaphore leak when a connection to the server fails.
+
+Issues Resolved
+...............
+
+See the `PyMongo 2.6.3 release notes in JIRA`_ for the list of resolved issues
+in this release.
+
+.. _PyMongo 2.6.3 release notes in JIRA: https://jira.mongodb.org/browse/PYTHON/fixforversion/13098
+
 Changes in Version 2.6.2
 ------------------------
 

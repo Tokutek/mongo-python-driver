@@ -1,4 +1,4 @@
-# Copyright 2009-2012 10gen, Inc.
+# Copyright 2009-2014 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,7 +16,9 @@
 
 import datetime
 import os
+import re
 import sys
+import warnings
 
 sys.path[0:0] = [""]
 import unittest
@@ -24,24 +26,30 @@ import unittest
 from nose.plugins.skip import SkipTest
 
 from bson.code import Code
+from bson.regex import Regex
 from bson.dbref import DBRef
 from bson.objectid import ObjectId
-from bson.son import SON
+from bson.son import SON, RE_TYPE
 from pymongo import (ALL,
                      auth,
                      OFF,
-                     SLOW_ONLY)
+                     SLOW_ONLY,
+                     helpers,
+                     ReadPreference)
 from pymongo.collection import Collection
 from pymongo.database import Database
 from pymongo.errors import (CollectionInvalid,
                             ConfigurationError,
+                            ExecutionTimeout,
                             InvalidName,
                             OperationFailure)
 from pymongo.son_manipulator import (AutoReference,
                                      NamespaceInjector,
+                                     SONManipulator,
                                      ObjectIdShuffler)
 from test import version
-from test.utils import is_mongos, server_started_with_auth
+from test.utils import (catch_warnings, get_command_line,
+                        is_mongos, remove_all_users, server_started_with_auth)
 from test.test_client import get_client
 
 
@@ -49,6 +57,9 @@ class TestDatabase(unittest.TestCase):
 
     def setUp(self):
         self.client = get_client()
+
+    def tearDown(self):
+        self.client = None
 
     def test_name(self):
         self.assertRaises(TypeError, Database, self.client, 4)
@@ -100,7 +111,14 @@ class TestDatabase(unittest.TestCase):
         db.drop_collection("test.foo")
         db.create_collection("test.foo")
         self.assertTrue(u"test.foo" in db.collection_names())
-        self.assertEqual(db.test.foo.options(), {})
+        expected = {}
+        if version.at_least(self.client, (2, 7, 0)):
+            # usePowerOf2Sizes server default
+            expected["flags"] = 1
+        result = db.test.foo.options()
+        # mongos 2.2.x adds an $auth field when auth is enabled.
+        result.pop('$auth', None)
+        self.assertEqual(result, expected)
         self.assertRaises(CollectionInvalid, db.create_collection, "test.foo")
 
     def test_collection_names(self):
@@ -203,7 +221,7 @@ class TestDatabase(unittest.TestCase):
         db = self.client.pymongo_test
 
         db.set_profiling_level(ALL)
-        db.test.find()
+        db.test.find_one()
         db.set_profiling_level(OFF)
 
         info = db.profiling_info()
@@ -223,7 +241,6 @@ class TestDatabase(unittest.TestCase):
             self.assertTrue(isinstance(info[0]['millis'], int))
             self.assertTrue(isinstance(info[0]['client'], basestring))
             self.assertTrue(isinstance(info[0]['user'], basestring))
-            self.assertTrue(isinstance(info[0]['ntoreturn'], int))
             self.assertTrue(isinstance(info[0]['ns'], basestring))
             self.assertTrue(isinstance(info[0]['op'], basestring))
         else:
@@ -297,16 +314,34 @@ class TestDatabase(unittest.TestCase):
         if not is_mongos(self.client):
             db.command('eval', 'sleep(100)', network_timeout=0.001)
 
+    def test_command_with_compile_re(self):
+        # We use 'aggregate' as our example command, since it's an easy way to
+        # retrieve a BSON regex from a collection using a command. But until
+        # MongoDB 2.3.2, aggregation turned regexes into strings: SERVER-6470.
+        if not version.at_least(self.client, (2, 3, 2)):
+            raise SkipTest(
+                "Retrieving a regex with aggregation requires "
+                "MongoDB >= 2.3.2")
+
+        db = self.client.pymongo_test
+        db.test.drop()
+        db.test.insert({'r': re.compile('.*')})
+
+        result = db.command('aggregate', 'test', pipeline=[])
+        self.assertTrue(isinstance(result['result'][0]['r'], RE_TYPE))
+        result = db.command('aggregate', 'test', pipeline=[], compile_re=False)
+        self.assertTrue(isinstance(result['result'][0]['r'], Regex))
+
     def test_last_status(self):
         db = self.client.pymongo_test
 
         db.test.remove({})
         db.test.save({"i": 1})
 
-        db.test.update({"i": 1}, {"$set": {"i": 2}})
+        db.test.update({"i": 1}, {"$set": {"i": 2}}, w=0)
         self.assertTrue(db.last_status()["updatedExisting"])
 
-        db.test.update({"i": 1}, {"$set": {"i": 500}})
+        db.test.update({"i": 1}, {"$set": {"i": 500}}, w=0)
         self.assertFalse(db.last_status()["updatedExisting"])
 
     def test_password_digest(self):
@@ -329,48 +364,192 @@ class TestDatabase(unittest.TestCase):
             raise SkipTest("Auth with sharding requires MongoDB >= 2.0.0")
         if is_mongos(self.client):
             raise SkipTest("Auth fails on sharding due to write concern race, see Tokutek/mongo#77")
-        db = self.client.pymongo_test
-        db.system.users.remove({})
-        db.remove_user("mike")
+        if not server_started_with_auth(self.client):
+            raise SkipTest('Authentication is not enabled on server')
 
-        self.assertRaises(TypeError, db.add_user, "user", '')
+        db = self.client.pymongo_test
+
+        # Configuration errors
+        self.assertRaises(ValueError, db.add_user, "user", '')
         self.assertRaises(TypeError, db.add_user, "user", 'password', 15)
         self.assertRaises(ConfigurationError, db.add_user,
                           "user", 'password', 'True')
+        self.assertRaises(ConfigurationError, db.add_user,
+                          "user", 'password', True, roles=['read'])
 
-        db.add_user("mike", "password")
+        if version.at_least(self.client, (2, 5, 3, -1)):
+            ctx = catch_warnings()
+            try:
+                warnings.simplefilter("error", DeprecationWarning)
+                self.assertRaises(DeprecationWarning, db.add_user,
+                                  "user", "password")
+                self.assertRaises(DeprecationWarning, db.add_user,
+                                  "user", "password", True)
+            finally:
+                ctx.exit()
 
-        self.assertRaises(TypeError, db.authenticate, 5, "password")
-        self.assertRaises(TypeError, db.authenticate, "mike", 5)
+            self.assertRaises(ConfigurationError, db.add_user,
+                              "user", "password", digestPassword=True)
 
-        self.assertRaises(OperationFailure,
-                          db.authenticate, "mike", "not a real password")
-        self.assertRaises(OperationFailure,
-                          db.authenticate, "faker", "password")
-        self.assertTrue(db.authenticate("mike", "password"))
-        self.assertTrue(db.authenticate(u"mike", u"password"))
-        db.logout()
+        self.client.admin.add_user("admin", "password")
+        self.client.admin.authenticate("admin", "password")
 
-        db.remove_user("mike")
-        self.assertRaises(OperationFailure,
-                          db.authenticate, "mike", "password")
+        try:
+            # Add / authenticate / remove
+            db.add_user("mike", "password")
+            self.assertRaises(TypeError, db.authenticate, 5, "password")
+            self.assertRaises(TypeError, db.authenticate, "mike", 5)
+            self.assertRaises(OperationFailure,
+                              db.authenticate, "mike", "not a real password")
+            self.assertRaises(OperationFailure,
+                              db.authenticate, "faker", "password")
+            self.assertTrue(db.authenticate("mike", "password"))
+            db.logout()
+            self.assertTrue(db.authenticate(u"mike", u"password"))
+            db.remove_user("mike")
+            db.logout()
 
-        self.assertRaises(OperationFailure,
-                          db.authenticate, "Gustave", u"Dor\xe9")
-        db.add_user("Gustave", u"Dor\xe9")
-        self.assertTrue(db.authenticate("Gustave", u"Dor\xe9"))
-        db.logout()
+            self.assertRaises(OperationFailure,
+                              db.authenticate, "mike", "password")
 
-        db.add_user("Gustave", "password")
-        self.assertRaises(OperationFailure,
-                          db.authenticate, "Gustave", u"Dor\xe9")
-        self.assertTrue(db.authenticate("Gustave", u"password"))
-        db.logout()
+            # Add / authenticate / change password
+            self.assertRaises(OperationFailure,
+                              db.authenticate, "Gustave", u"Dor\xe9")
+            db.add_user("Gustave", u"Dor\xe9")
+            self.assertTrue(db.authenticate("Gustave", u"Dor\xe9"))
+            db.add_user("Gustave", "password")
+            db.logout()
+            self.assertRaises(OperationFailure,
+                              db.authenticate, "Gustave", u"Dor\xe9")
+            self.assertTrue(db.authenticate("Gustave", u"password"))
 
-        db.add_user("Ross", "password", read_only=True)
-        self.assertTrue(db.authenticate("Ross", u"password"))
-        self.assertTrue(db.system.users.find({"readOnly": True}).count())
-        db.logout()
+            if not version.at_least(self.client, (2, 5, 3, -1)):
+                # Add a readOnly user
+                db.add_user("Ross", "password", read_only=True)
+                db.logout()
+                self.assertTrue(db.authenticate("Ross", u"password"))
+                self.assertTrue(db.system.users.find({"readOnly": True}).count())
+                db.logout()
+
+        # Cleanup
+        finally:
+            remove_all_users(db)
+            self.client.admin.remove_user("admin")
+            self.client.admin.logout()
+
+    def test_make_user_readonly(self):
+        if (is_mongos(self.client)
+                and not version.at_least(self.client, (2, 0, 0))):
+            raise SkipTest('Auth with sharding requires MongoDB >= 2.0.0')
+
+        if not server_started_with_auth(self.client):
+            raise SkipTest('Authentication is not enabled on server')
+
+        admin = self.client.admin
+        admin.add_user('admin', 'pw')
+        admin.authenticate('admin', 'pw')
+
+        db = self.client.pymongo_test
+
+        try:
+            # Make a read-write user.
+            db.add_user('jesse', 'pw')
+            admin.logout()
+
+            # Check that we're read-write by default.
+            db.authenticate('jesse', 'pw')
+            db.collection.insert({})
+            db.logout()
+
+            # Make the user read-only.
+            admin.authenticate('admin', 'pw')
+            db.add_user('jesse', 'pw', read_only=True)
+            admin.logout()
+
+            db.authenticate('jesse', 'pw')
+            self.assertRaises(OperationFailure, db.collection.insert, {})
+        finally:
+            # Cleanup
+            admin.authenticate('admin', 'pw')
+            remove_all_users(db)
+            admin.remove_user("admin")
+            admin.logout()
+
+    def test_default_roles(self):
+        if not version.at_least(self.client, (2, 5, 3, -1)):
+            raise SkipTest("Default roles only exist in MongoDB >= 2.5.3")
+        if not server_started_with_auth(self.client):
+            raise SkipTest('Authentication is not enabled on server')
+
+        # "Admin" user
+        db = self.client.admin
+        db.add_user('admin', 'pass')
+        try:
+            db.authenticate('admin', 'pass')
+            info = db.command('usersInfo', 'admin')['users'][0]
+            self.assertEqual("root", info['roles'][0]['role'])
+
+            # Read only "admin" user
+            db.add_user('ro-admin', 'pass', read_only=True)
+            db.logout()
+            db.authenticate('ro-admin', 'pass')
+            info = db.command('usersInfo', 'ro-admin')['users'][0]
+            self.assertEqual("readAnyDatabase", info['roles'][0]['role'])
+            db.logout()
+
+        # Cleanup
+        finally:
+            db.authenticate('admin', 'pass')
+            remove_all_users(db)
+            db.logout()
+
+        db.connection.disconnect()
+
+        # "Non-admin" user
+        db = self.client.pymongo_test
+        db.add_user('user', 'pass')
+        try:
+            db.authenticate('user', 'pass')
+            info = db.command('usersInfo', 'user')['users'][0]
+            self.assertEqual("dbOwner", info['roles'][0]['role'])
+
+            # Read only "Non-admin" user
+            db.add_user('ro-user', 'pass', read_only=True)
+            db.logout()
+            db.authenticate('ro-user', 'pass')
+            info = db.command('usersInfo', 'ro-user')['users'][0]
+            self.assertEqual("read", info['roles'][0]['role'])
+            db.logout()
+
+        # Cleanup
+        finally:
+            db.authenticate('user', 'pass')
+            remove_all_users(db)
+            db.logout()
+
+    def test_new_user_cmds(self):
+        if not version.at_least(self.client, (2, 5, 3, -1)):
+            raise SkipTest("User manipulation through commands "
+                           "requires MongoDB >= 2.5.3")
+        if not server_started_with_auth(self.client):
+            raise SkipTest('Authentication is not enabled on server')
+
+        db = self.client.pymongo_test
+        db.add_user("amalia", "password", roles=["userAdmin"])
+        db.authenticate("amalia", "password")
+        try:
+            # This tests the ability to update user attributes.
+            db.add_user("amalia", "new_password",
+                        customData={"secret": "koalas"})
+
+            user_info = db.command("usersInfo", "amalia")
+            self.assertTrue(user_info["users"])
+            amalia_user = user_info["users"][0]
+            self.assertEqual(amalia_user["user"], "amalia")
+            self.assertEqual(amalia_user["customData"], {"secret": "koalas"})
+        finally:
+            db.remove_user("amalia")
+            db.logout()
 
     def test_authenticate_and_safe(self):
         if (is_mongos(self.client) and not
@@ -378,25 +557,29 @@ class TestDatabase(unittest.TestCase):
             raise SkipTest("Auth with sharding requires MongoDB >= 2.0.0")
         if is_mongos(self.client):
             raise SkipTest("Auth fails on sharding due to write concern race, see Tokutek/mongo#77")
+        if not server_started_with_auth(self.client):
+            raise SkipTest('Authentication is not enabled on server')
         db = self.client.auth_test
-        db.system.users.remove({})
-        db.add_user("bernie", "password")
+
+        db.add_user("bernie", "password",
+                    roles=["userAdmin", "dbAdmin", "readWrite"])
         db.authenticate("bernie", "password")
+        try:
+            db.test.remove({})
+            self.assertTrue(db.test.insert({"bim": "baz"}))
+            self.assertEqual(1, db.test.count())
 
-        db.test.remove({})
-        self.assertTrue(db.test.insert({"bim": "baz"}))
-        self.assertEqual(1, db.test.count())
+            self.assertEqual(1,
+                             db.test.update({"bim": "baz"},
+                                            {"$set": {"bim": "bar"}}).get('n'))
 
-        self.assertEqual(1,
-                         db.test.update({"bim": "baz"},
-                                        {"$set": {"bim": "bar"}}).get('n'))
+            self.assertEqual(1,
+                             db.test.remove({}).get('n'))
 
-        self.assertEqual(1,
-                         db.test.remove({}).get('n'))
-
-        self.assertEqual(0, db.test.count())
-        self.client.drop_database("auth_test")
-
+            self.assertEqual(0, db.test.count())
+        finally:
+            db.remove_user("bernie")
+            db.logout()
 
     def test_authenticate_and_request(self):
         if (is_mongos(self.client) and not
@@ -404,36 +587,36 @@ class TestDatabase(unittest.TestCase):
             raise SkipTest("Auth with sharding requires MongoDB >= 2.0.0")
         if is_mongos(self.client):
             raise SkipTest("Auth fails on sharding due to write concern race, see Tokutek/mongo#77")
+        if not server_started_with_auth(self.client):
+            raise SkipTest('Authentication is not enabled on server')
 
         # Database.authenticate() needs to be in a request - check that it
         # always runs in a request, and that it restores the request state
         # (in or not in a request) properly when it's finished.
         self.assertFalse(self.client.auto_start_request)
         db = self.client.pymongo_test
-        db.system.users.remove({})
-        db.remove_user("mike")
-        db.add_user("mike", "password")
-        self.assertFalse(self.client.in_request())
-        self.assertTrue(db.authenticate("mike", "password"))
-        self.assertFalse(self.client.in_request())
+        db.add_user("mike", "password",
+                    roles=["userAdmin", "dbAdmin", "readWrite"])
+        try:
+            self.assertFalse(self.client.in_request())
+            self.assertTrue(db.authenticate("mike", "password"))
+            self.assertFalse(self.client.in_request())
 
-        request_cx = get_client(auto_start_request=True)
-        request_db = request_cx.pymongo_test
-        self.assertTrue(request_cx.in_request())
-        self.assertTrue(request_db.authenticate("mike", "password"))
-        self.assertTrue(request_cx.in_request())
-
-        # just make sure there are no exceptions here
-        db.logout()
-        db.collection.find_one()
-        request_db.logout()
-        request_db.collection.find_one()
+            request_cx = get_client(auto_start_request=True)
+            request_db = request_cx.pymongo_test
+            self.assertTrue(request_db.authenticate("mike", "password"))
+            self.assertTrue(request_cx.in_request())
+        finally:
+            db.authenticate("mike", "password")
+            db.remove_user("mike")
+            db.logout()
+            request_db.logout()
 
     def test_authenticate_multiple(self):
         client = get_client()
         if (is_mongos(client) and not
-            version.at_least(self.client, (2, 0, 0))):
-            raise SkipTest("Auth with sharding requires MongoDB >= 2.0.0")
+                version.at_least(self.client, (2, 2, 0))):
+            raise SkipTest("Need mongos >= 2.2.0")
         if not server_started_with_auth(client):
             raise SkipTest("Authentication is not enabled on server")
 
@@ -441,73 +624,72 @@ class TestDatabase(unittest.TestCase):
         users_db = client.pymongo_test
         admin_db = client.admin
         other_db = client.pymongo_test1
-        users_db.system.users.remove()
-        admin_db.system.users.remove()
         users_db.test.remove()
         other_db.test.remove()
 
-        admin_db.add_user('admin', 'pass')
-        self.assertTrue(admin_db.authenticate('admin', 'pass'))
+        admin_db.add_user('admin', 'pass',
+                          roles=["userAdminAnyDatabase", "dbAdmin",
+                                 "clusterAdmin", "readWrite"])
+        try:
+            self.assertTrue(admin_db.authenticate('admin', 'pass'))
 
-        admin_db.add_user('ro-admin', 'pass', read_only=True)
-        users_db.add_user('user', 'pass')
+            if version.at_least(self.client, (2, 5, 3, -1)):
+                admin_db.add_user('ro-admin', 'pass',
+                                  roles=["userAdmin", "readAnyDatabase"])
+            else:
+                admin_db.add_user('ro-admin', 'pass', read_only=True)
 
-        admin_db.logout()
-        self.assertRaises(OperationFailure, users_db.test.find_one)
+            users_db.add_user('user', 'pass',
+                              roles=["userAdmin", "readWrite"])
 
-        # Regular user should be able to query its own db, but
-        # no other.
-        users_db.authenticate('user', 'pass')
-        self.assertEqual(0, users_db.test.count())
-        self.assertRaises(OperationFailure, other_db.test.find_one)
+            admin_db.logout()
+            self.assertRaises(OperationFailure, users_db.test.find_one)
 
-        # Admin read-only user should be able to query any db,
-        # but not write.
-        admin_db.authenticate('ro-admin', 'pass')
-        self.assertEqual(0, other_db.test.count())
-        self.assertRaises(OperationFailure,
-                          other_db.test.insert, {})
+            # Regular user should be able to query its own db, but
+            # no other.
+            users_db.authenticate('user', 'pass')
+            self.assertEqual(0, users_db.test.count())
+            self.assertRaises(OperationFailure, other_db.test.find_one)
 
-        # Force close all sockets
-        client.disconnect()
+            # Admin read-only user should be able to query any db,
+            # but not write.
+            admin_db.authenticate('ro-admin', 'pass')
+            self.assertEqual(0, other_db.test.count())
+            self.assertRaises(OperationFailure,
+                              other_db.test.insert, {})
 
-        # We should still be able to write to the regular user's db
-        self.assertTrue(users_db.test.remove())
-        # And read from other dbs...
-        self.assertEqual(0, other_db.test.count())
-        # But still not write to other dbs...
-        self.assertRaises(OperationFailure,
-                          other_db.test.insert, {})
+            # Force close all sockets
+            client.disconnect()
+
+            # We should still be able to write to the regular user's db
+            self.assertTrue(users_db.test.remove())
+            # And read from other dbs...
+            self.assertEqual(0, other_db.test.count())
+            # But still not write to other dbs...
+            self.assertRaises(OperationFailure,
+                              other_db.test.insert, {})
 
         # Cleanup
-        admin_db.logout()
-        users_db.logout()
-        self.assertTrue(admin_db.authenticate('admin', 'pass'))
-        self.assertTrue(admin_db.system.users.remove())
-        self.assertEqual(0, admin_db.system.users.count())
-        self.assertTrue(users_db.system.users.remove())
+        finally:
+            admin_db.logout()
+            users_db.logout()
+            admin_db.authenticate('admin', 'pass')
+            remove_all_users(users_db)
+            remove_all_users(admin_db)
 
     def test_id_ordering(self):
         # PyMongo attempts to have _id show up first
         # when you iterate key/value pairs in a document.
         # This isn't reliable since python dicts don't
         # guarantee any particular order. This will never
-        # work right in Jython or Python >= 3.3 with
-        # hash randomization enabled.
+        # work right in Jython or any Python or environment
+        # with hash randomization enabled (e.g. tox).
         db = self.client.pymongo_test
         db.test.remove({})
         db.test.insert(SON([("hello", "world"),
                             ("_id", 5)]))
 
-        if ((sys.version_info >= (3, 3) and
-             os.environ.get('PYTHONHASHSEED') != '0') or
-            sys.platform.startswith('java')):
-            # See http://bugs.python.org/issue13703 for why we
-            # use as_class=SON in certain environments.
-            cursor = db.test.find(as_class=SON)
-        else:
-            cursor = db.test.find()
-
+        cursor = db.test.find(as_class=SON)
         for x in cursor:
             for (k, v) in x.items():
                 self.assertEqual(k, "_id")
@@ -749,21 +931,101 @@ class TestDatabase(unittest.TestCase):
 
     def test_manipulator_properties(self):
         db = self.client.foo
-        self.assertEqual(['ObjectIdInjector'], db.incoming_manipulators)
+        self.assertEqual([], db.incoming_manipulators)
         self.assertEqual([], db.incoming_copying_manipulators)
         self.assertEqual([], db.outgoing_manipulators)
         self.assertEqual([], db.outgoing_copying_manipulators)
         db.add_son_manipulator(AutoReference(db))
         db.add_son_manipulator(NamespaceInjector())
         db.add_son_manipulator(ObjectIdShuffler())
-        self.assertEqual(2, len(db.incoming_manipulators))
-        for name in db.incoming_manipulators:
-            self.assertTrue(name in ('ObjectIdInjector', 'NamespaceInjector'))
+        self.assertEqual(1, len(db.incoming_manipulators))
+        self.assertEqual(db.incoming_manipulators, ['NamespaceInjector'])
         self.assertEqual(2, len(db.incoming_copying_manipulators))
         for name in db.incoming_copying_manipulators:
             self.assertTrue(name in ('ObjectIdShuffler', 'AutoReference'))
         self.assertEqual([], db.outgoing_manipulators)
         self.assertEqual(['AutoReference'], db.outgoing_copying_manipulators)
+
+    def test_command_response_without_ok(self):
+        # Sometimes (SERVER-10891) the server's response to a badly-formatted
+        # command document will have no 'ok' field. We should raise
+        # OperationFailure instead of KeyError.
+        self.assertRaises(
+            OperationFailure,
+            helpers._check_command_response, {}, reset=None)
+
+        try:
+            helpers._check_command_response({'$err': 'foo'}, reset=None)
+        except OperationFailure, e:
+            self.assertEqual(e.args[0], 'foo')
+        else:
+            self.fail("_check_command_response didn't raise OperationFailure")
+
+    def test_command_read_pref_warning(self):
+        ctx = catch_warnings()
+        try:
+            warnings.simplefilter("error", UserWarning)
+            self.assertRaises(UserWarning, self.client.pymongo_test.command,
+                              'ping', read_preference=ReadPreference.SECONDARY)
+            try:
+                self.client.pymongo_test.command('dbStats',
+                    read_preference=ReadPreference.SECONDARY_PREFERRED)
+            except UserWarning:
+                self.fail("Shouldn't have raised UserWarning.")
+        finally:
+            ctx.exit()
+
+    def test_command_max_time_ms(self):
+        if not version.at_least(self.client, (2, 5, 3, -1)):
+            raise SkipTest("MaxTimeMS requires MongoDB >= 2.5.3")
+        if "enableTestCommands=1" not in get_command_line(self.client)["argv"]:
+            raise SkipTest("Test commands must be enabled.")
+
+        self.client.admin.command("configureFailPoint",
+                                  "maxTimeAlwaysTimeOut",
+                                  mode="alwaysOn")
+        try:
+            db = self.client.pymongo_test
+            db.command('count', 'test')
+            self.assertRaises(ExecutionTimeout, db.command,
+                              'count', 'test', maxTimeMS=1)
+            pipeline = [{'$project': {'name': 1, 'count': 1}}]
+            # Database command helper.
+            db.command('aggregate', 'test', pipeline=pipeline)
+            self.assertRaises(ExecutionTimeout, db.command,
+                              'aggregate', 'test',
+                              pipeline=pipeline, maxTimeMS=1)
+            # Collection helper.
+            db.test.aggregate(pipeline=pipeline)
+            self.assertRaises(ExecutionTimeout,
+                              db.test.aggregate, pipeline, maxTimeMS=1)
+        finally:
+            self.client.admin.command("configureFailPoint",
+                                      "maxTimeAlwaysTimeOut",
+                                      mode="off")
+
+    def test_object_to_dict_transformer(self):
+        # PYTHON-709: Some users rely on their custom SONManipulators to run
+        # before any other checks, so they can insert non-dict objects and
+        # have them dictified before the _id is inserted or any other
+        # processing.
+        class Thing(object):
+            def __init__(self, value):
+                self.value = value
+
+        class ThingTransformer(SONManipulator):
+            def transform_incoming(self, thing, collection):
+                return {'value': thing.value}
+
+        db = self.client.foo
+        db.add_son_manipulator(ThingTransformer())
+        t = Thing('value')
+
+        db.test.remove()
+        db.test.insert([t])
+        out = db.test.find_one()
+        self.assertEqual('value', out.get('value'))
+
 
 
 if __name__ == "__main__":

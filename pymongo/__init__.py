@@ -1,4 +1,4 @@
-# Copyright 2009-2012 10gen, Inc.
+# Copyright 2009-2014 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -27,7 +27,7 @@ GEO2D = "2d"
 
 .. note:: Geo-spatial indexing requires server version **>= 1.3.3**.
 
-.. _geospatial index: http://docs.mongodb.org/manual/core/geospatial-indexes/
+.. _geospatial index: http://docs.mongodb.org/manual/core/2d/
 """
 
 GEOHAYSTACK = "geoHaystack"
@@ -37,7 +37,7 @@ GEOHAYSTACK = "geoHaystack"
 
 .. note:: Geo-spatial indexing requires server version **>= 1.5.6**.
 
-.. _haystack index: http://docs.mongodb.org/manual/core/geospatial-indexes/#haystack-indexes
+.. _haystack index: http://docs.mongodb.org/manual/core/geohaystack/
 """
 
 GEOSPHERE = "2dsphere"
@@ -47,7 +47,7 @@ GEOSPHERE = "2dsphere"
 
 .. note:: 2dsphere indexing requires server version **>= 2.4.0**.
 
-.. _spherical geospatial index: http://docs.mongodb.org/manual/release-notes/2.4/#new-geospatial-indexes-with-geojson-and-improved-spherical-geometry
+.. _spherical geospatial index: http://docs.mongodb.org/manual/core/2dsphere/
 """
 
 HASHED = "hashed"
@@ -57,7 +57,17 @@ HASHED = "hashed"
 
 .. note:: hashed indexing requires server version **>= 2.4.0**.
 
-.. _hashed index: http://docs.mongodb.org/manual/release-notes/2.4/#new-hashed-index-and-sharding-with-a-hashed-shard-key
+.. _hashed index: http://docs.mongodb.org/manual/core/index-hashed/
+"""
+
+TEXT = "text"
+"""Index specifier for a `text index`_.
+
+.. versionadded:: 2.7.1
+
+.. note:: text search requires server version **>= 2.4.0**.
+
+.. _text index: http://docs.mongodb.org/manual/core/index-text/
 """
 
 OFF = 0
@@ -67,7 +77,7 @@ SLOW_ONLY = 1
 ALL = 2
 """Profile all operations."""
 
-version_tuple = (2, 6, 2)
+version_tuple = (2, 7, 2)
 
 def get_version_string():
     if isinstance(version_tuple[-1], basestring):
@@ -77,6 +87,8 @@ def get_version_string():
 version = get_version_string()
 """Current version of PyMongo."""
 
+from pymongo.common import (MIN_SUPPORTED_WIRE_VERSION,
+                            MAX_SUPPORTED_WIRE_VERSION)
 from pymongo.connection import Connection
 from pymongo.mongo_client import MongoClient
 from pymongo.mongo_replica_set_client import MongoReplicaSetClient

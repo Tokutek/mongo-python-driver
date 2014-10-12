@@ -1,4 +1,4 @@
-# Copyright 2011-2012 10gen, Inc.
+# Copyright 2011-2014 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you
 # may not use this file except in compliance with the License.  You
@@ -49,24 +49,21 @@ from pymongo import (auth,
                      pool,
                      thread_util,
                      uri_parser)
+from pymongo.member import Member
 from pymongo.read_preferences import (
     ReadPreference, select_member, modes, MovingAverage)
 from pymongo.errors import (AutoReconnect,
                             ConfigurationError,
                             ConnectionFailure,
+                            DocumentTooLarge,
                             DuplicateKeyError,
-                            InvalidDocument,
                             OperationFailure,
                             InvalidOperation)
+from pymongo.read_preferences import ReadPreference
+from pymongo.thread_util import DummyLock
 
 EMPTY = b("")
-MAX_BSON_SIZE = 4 * 1024 * 1024
 MAX_RETRY = 3
-
-# Member states
-PRIMARY = 1
-SECONDARY = 2
-OTHER = 3
 
 MONITORS = set()
 
@@ -133,49 +130,63 @@ def _partition_node(node):
 
 class RSState(object):
     def __init__(
-            self, threadlocal, host_to_member=None, arbiters=None, writer=None,
-            error_message='No primary available'):
+            self, threadlocal, hosts=None, host_to_member=None, arbiters=None,
+            writer=None, error_message='No primary available', exc=None,
+            initial=False):
         """An immutable snapshot of the client's view of the replica set state.
+
+        Stores Member instances for all members we're connected to, and a
+        list of (host, port) pairs for all the hosts and arbiters listed
+        in the most recent ismaster response.
 
         :Parameters:
           - `threadlocal`: Thread- or greenlet-local storage
+          - `hosts`: Sequence of (host, port) pairs
           - `host_to_member`: Optional dict: (host, port) -> Member instance
           - `arbiters`: Optional sequence of arbiters as (host, port)
           - `writer`: Optional (host, port) of primary
           - `error_message`: Optional error if `writer` is None
+          - `exc`: Optional error if state is unusable
+          - `initial`: Whether this is the initial client state
         """
         self._threadlocal = threadlocal  # threading.local or gevent local
         self._arbiters = frozenset(arbiters or [])  # set of (host, port)
         self._writer = writer  # (host, port) of the primary, or None
         self._error_message = error_message
         self._host_to_member = host_to_member or {}
-        self._hosts = frozenset(self._host_to_member)
+        self._hosts = frozenset(hosts or [])
         self._members = frozenset(self._host_to_member.values())
-
-        if writer and self._host_to_member[writer].up:
-            self._primary_member = self._host_to_member[writer]
-        else:
-            self._primary_member = None
+        self._exc = exc
+        self._initial = initial
+        self._primary_member = self.get(writer)
 
     def clone_with_host_down(self, host, error_message):
         """Get a clone, marking as "down" the member with the given (host, port)
         """
         members = self._host_to_member.copy()
-        down_member = members.pop(host, None)
-        if down_member:
-            members[host] = down_member.clone_down()
+        members.pop(host, None)
 
         if host == self.writer:
             # The primary went down; record the error message.
             return RSState(
-                self._threadlocal, members, self._arbiters,
-                None, error_message)
+                self._threadlocal,
+                self._hosts,
+                members,
+                self._arbiters,
+                None,
+                error_message,
+                self._exc)
         else:
             # Some other host went down. Keep our current primary or, if it's
             # already down, keep our current error message.
             return RSState(
-                self._threadlocal, members, self._arbiters,
-                self._writer, self._error_message)
+                self._threadlocal,
+                self._hosts,
+                members,
+                self._arbiters,
+                self._writer,
+                self._error_message,
+                self._exc)
 
     def clone_without_writer(self, threadlocal):
         """Get a clone without a primary. Unpins all threads.
@@ -184,11 +195,25 @@ class RSState(object):
           - `threadlocal`: Thread- or greenlet-local storage
         """
         return RSState(
-            threadlocal, self._host_to_member.copy(), self._arbiters, None)
+            threadlocal,
+            self._hosts,
+            self._host_to_member,
+            self._arbiters)
+
+    def clone_with_error(self, exc):
+        return RSState(
+            self._threadlocal,
+            self._hosts,
+            self._host_to_member.copy(),
+            self._arbiters,
+            self._writer,
+            self._error_message,
+            exc)
 
     @property
     def arbiters(self):
-        """Set of (host, port) pairs."""
+        """(host, port) pairs from the last ismaster response's arbiter list.
+        """
         return self._arbiters
 
     @property
@@ -202,7 +227,7 @@ class RSState(object):
 
     @property
     def hosts(self):
-        """Set of (host, port) tuples of data members of the replica set."""
+        """(host, port) pairs from the last ismaster response's host list."""
         return self._hosts
 
     @property
@@ -217,12 +242,22 @@ class RSState(object):
 
     @property
     def secondaries(self):
-        """Set of (host, port) pairs."""
+        """Set of (host, port) pairs, secondaries we're connected to."""
         # Unlike the other properties, this isn't cached because it isn't used
         # in regular operations.
         return set([
             host for host, member in self._host_to_member.items()
             if member.is_secondary])
+
+    @property
+    def exc(self):
+        """Reason RSState is unusable, or None."""
+        return self._exc
+
+    @property
+    def initial(self):
+        """Whether this is the initial client state."""
+        return self._initial
 
     def get(self, host):
         """Return a Member instance or None for the given (host, port)."""
@@ -278,6 +313,10 @@ class Monitor(object):
     def start_sync(self):
         """Start the Monitor and block until it's really started.
         """
+        # start() can return before the thread is fully bootstrapped,
+        # so a fork can leave the thread thinking it's alive in a child
+        # process when it's really dead:
+        # http://bugs.python.org/issue18418.
         self.start()  # Implemented in subclasses.
         self.started_event.wait(5)
 
@@ -291,9 +330,8 @@ class Monitor(object):
         """Refresh immediately
         """
         if not self.isAlive():
-            raise InvalidOperation(
-                "Monitor thread is dead: Perhaps started before a fork?")
-
+            # Checks in RS client should prevent this.
+            raise AssertionError("schedule_refresh called with dead monitor")
         self.refreshed.clear()
         self.timer.set()
 
@@ -337,13 +375,7 @@ class MonitorThread(threading.Thread, Monitor):
         Monitor.__init__(self, rsc, threading.Event)
         threading.Thread.__init__(self)
         self.setName("ReplicaSetMonitorThread")
-
-        # Track whether the thread has started. (Greenlets track this already.)
-        self.started = False
-
-    def start(self):
-        self.started = True
-        super(MonitorThread, self).start()
+        self.setDaemon(True)
 
     def run(self):
         """Override Thread's run method.
@@ -364,8 +396,15 @@ try:
         """Greenlet based replica set monitor.
         """
         def __init__(self, rsc):
+            self.monitor_greenlet_alive = False
             Monitor.__init__(self, rsc, Event)
             Greenlet.__init__(self)
+
+        def start_sync(self):
+            self.monitor_greenlet_alive = True
+
+            # Call superclass.
+            Monitor.start_sync(self)
 
         # Don't override `run` in a Greenlet. Add _run instead.
         # Refer to gevent's Greenlet docs and source for more
@@ -376,116 +415,22 @@ try:
             self.monitor()
 
         def isAlive(self):
-            # Gevent defines bool(Greenlet) as True if it's alive.
-            return bool(self)
+            # bool(self) isn't immediately True after someone calls start(),
+            # but isAlive() is. Thus it's safe for greenlets to do:
+            # "if not monitor.isAlive(): monitor.start()"
+            # ... and be guaranteed only one greenlet starts the monitor.
+            return self.monitor_greenlet_alive
 
 except ImportError:
     pass
 
 
-class Member(object):
-    """Immutable representation of one member of a replica set.
-
-    :Parameters:
-      - `host`: A (host, port) pair
-      - `connection_pool`: A Pool instance
-      - `ismaster_response`: A dict, MongoDB's ismaster response
-      - `ping_time`: A MovingAverage instance
-      - `up`: Whether we think this member is available
-    """
-    # For unittesting only. Use under no circumstances!
-    _host_to_ping_time = {}
-
-    def __init__(self, host, connection_pool, ismaster_response, ping_time, up):
-        self.host = host
-        self.pool = connection_pool
-        self.ismaster_response = ismaster_response
-        self.ping_time = ping_time
-        self.up = up
-
-        if ismaster_response['ismaster']:
-            self.state = PRIMARY
-        elif ismaster_response.get('secondary'):
-            self.state = SECONDARY
-        else:
-            self.state = OTHER
-
-        self.tags = ismaster_response.get('tags', {})
-        self.max_bson_size = ismaster_response.get(
-            'maxBsonObjectSize', MAX_BSON_SIZE)
-        self.max_message_size = ismaster_response.get(
-            'maxMessageSizeBytes', 2 * self.max_bson_size)
-
-    def clone_with(self, ismaster_response, ping_time_sample):
-        """Get a clone updated with ismaster response and a single ping time.
-        """
-        ping_time = self.ping_time.clone_with(ping_time_sample)
-        return Member(self.host, self.pool, ismaster_response, ping_time, True)
-
-    def clone_down(self):
-        """Get a clone of this Member, but with up=False.
-        """
-        return Member(
-            self.host, self.pool, self.ismaster_response, self.ping_time,
-            False)
-
-    @property
-    def is_primary(self):
-        return self.state == PRIMARY
-
-    @property
-    def is_secondary(self):
-        return self.state == SECONDARY
-
-    def get_avg_ping_time(self):
-        """Get a moving average of this member's ping times.
-        """
-        if self.host in Member._host_to_ping_time:
-            # Simulate ping times for unittesting
-            return Member._host_to_ping_time[self.host]
-
-        return self.ping_time.get()
-
-    def matches_mode(self, mode):
-        if mode == ReadPreference.PRIMARY and not self.is_primary:
-            return False
-
-        if mode == ReadPreference.SECONDARY and not self.is_secondary:
-            return False
-
-        # If we're not primary or secondary, then we're in a state like
-        # RECOVERING and we don't match any mode
-        return self.is_primary or self.is_secondary
-
-    def matches_tags(self, tags):
-        """Return True if this member's tags are a superset of the passed-in
-           tags. E.g., if this member is tagged {'dc': 'ny', 'rack': '1'},
-           then it matches {'dc': 'ny'}.
-        """
-        for key, value in tags.items():
-            if key not in self.tags or self.tags[key] != value:
-                return False
-
-        return True
-
-    def matches_tag_sets(self, tag_sets):
-        """Return True if this member matches any of the tag sets, e.g.
-           [{'dc': 'ny'}, {'dc': 'la'}, {}]
-        """
-        for tags in tag_sets:
-            if self.matches_tags(tags):
-                return True
-
-        return False
-
-    def __str__(self):
-        return '<Member "%s:%s" primary=%r up=%r>' % (
-            self.host[0], self.host[1], self.is_primary, self.up)
-
-
 class MongoReplicaSetClient(common.BaseObject):
     """Connection to a MongoDB replica set.
     """
+
+    # For tests.
+    _refresh_timeout_sec = 5
 
     def __init__(self, hosts_or_uri=None, max_pool_size=100,
                  document_class=dict, tz_aware=False, _connect=True, **kwargs):
@@ -516,11 +461,6 @@ class MongoReplicaSetClient(common.BaseObject):
            sure you call :meth:`~close` to ensure that the monitor task is
            cleanly shut down.
 
-        .. note:: A :class:`MongoReplicaSetClient` created before a call to
-           ``os.fork()`` is invalid after the fork. Applications should either
-           fork before creating the client, or recreate the client after a
-           fork.
-
         :Parameters:
           - `hosts_or_uri` (optional): A MongoDB URI or string of `host:port`
             pairs. If a host is an IPv6 literal it must be enclosed in '[' and
@@ -549,9 +489,17 @@ class MongoReplicaSetClient(common.BaseObject):
           - `port`: For compatibility with :class:`~mongo_client.MongoClient`.
             The default port number to use for hosts.
           - `socketTimeoutMS`: (integer) How long (in milliseconds) a send or
-            receive on a socket can take before timing out.
+            receive on a socket can take before timing out. Defaults to ``None``
+            (no timeout).
           - `connectTimeoutMS`: (integer) How long (in milliseconds) a
-            connection can take to be opened before timing out.
+            connection can take to be opened before timing out. Defaults to
+            ``20000``.
+          - `waitQueueTimeoutMS`: (integer) How long (in milliseconds) a
+            thread will wait for a socket from the pool if the pool has no
+            free sockets. Defaults to ``None`` (no timeout).
+          - `waitQueueMultiple`: (integer) Multiplied by max_pool_size to give
+            the number of threads allowed to wait for a socket at one time.
+            Defaults to ``None`` (no waiters).
           - `auto_start_request`: If ``True``, each thread that accesses
             this :class:`MongoReplicaSetClient` has a socket allocated to it
             for the thread's lifetime, for each member of the set. For
@@ -579,10 +527,16 @@ class MongoReplicaSetClient(common.BaseObject):
             to complete. If replication does not complete in the given
             timeframe, a timeout exception is raised.
           - `j`: If ``True`` block until write operations have been committed
-            to the journal. Ignored if the server is running without journaling.
-          - `fsync`: If ``True`` force the database to fsync all files before
-            returning. When used with `j` the server awaits the next group
-            commit before returning.
+            to the journal. Cannot be used in combination with `fsync`. Prior
+            to MongoDB 2.6 this option was ignored if the server was running
+            without journaling. Starting with MongoDB 2.6 write operations will
+            fail with an exception if this option is used when the server is
+            running without journaling.
+          - `fsync`: If ``True`` and the server is running without journaling,
+            blocks until the server has synced all data files to disk. If the
+            server is running with journaling, this acts the same as the `j`
+            option, blocking until write operations have been committed to the
+            journal. Cannot be used in combination with `j`.
 
           | **Read preference options:**
 
@@ -606,7 +560,7 @@ class MongoReplicaSetClient(common.BaseObject):
 
           - `ssl`: If ``True``, create the connection to the servers using SSL.
           - `ssl_keyfile`: The private keyfile used to identify the local
-            connection against mongod.  If included with the ``certfile` then
+            connection against mongod.  If included with the ``certfile`` then
             only the ``ssl_certfile`` is needed.  Implies ``ssl=True``.
           - `ssl_certfile`: The certificate file used to identify the local
             connection against mongod. Implies ``ssl=True``.
@@ -639,6 +593,7 @@ class MongoReplicaSetClient(common.BaseObject):
         self.__tz_aware = common.validate_boolean('tz_aware', tz_aware)
         self.__document_class = document_class
         self.__monitor = None
+        self.__closed = False
 
         # Compatibility with mongo_client.MongoClient
         host = kwargs.pop('host', hosts_or_uri)
@@ -664,9 +619,9 @@ class MongoReplicaSetClient(common.BaseObject):
             self.__seeds.update(uri_parser.split_hosts(host, port))
 
         # _pool_class and _monitor_class are for deep customization of PyMongo,
-        # e.g. Motor. SHOULD NOT BE USED BY DEVELOPERS EXTERNAL TO 10GEN.
+        # e.g. Motor. SHOULD NOT BE USED BY DEVELOPERS EXTERNAL TO MONGODB.
         self.pool_class = kwargs.pop('_pool_class', pool.Pool)
-        monitor_class = kwargs.pop('_monitor_class', None)
+        self.__monitor_class = kwargs.pop('_monitor_class', None)
 
         for option, value in kwargs.iteritems():
             option, value = common.validate(option, value)
@@ -679,7 +634,7 @@ class MongoReplicaSetClient(common.BaseObject):
                 "The gevent module is not available. "
                 "Install the gevent package from PyPI.")
 
-        self.__rs_state = RSState(self.__make_threadlocal())
+        self.__rs_state = RSState(self.__make_threadlocal(), initial=True)
 
         self.__request_counter = thread_util.Counter(self.__use_greenlets)
 
@@ -694,6 +649,8 @@ class MongoReplicaSetClient(common.BaseObject):
 
         self.__net_timeout = self.__opts.get('sockettimeoutms')
         self.__conn_timeout = self.__opts.get('connecttimeoutms')
+        self.__wait_queue_timeout = self.__opts.get('waitqueuetimeoutms')
+        self.__wait_queue_multiple = self.__opts.get('waitqueuemultiple')
         self.__use_ssl = self.__opts.get('ssl', None)
         self.__ssl_keyfile = self.__opts.get('ssl_keyfile', None)
         self.__ssl_certfile = self.__opts.get('ssl_certfile', None)
@@ -701,7 +658,7 @@ class MongoReplicaSetClient(common.BaseObject):
         self.__ssl_ca_certs = self.__opts.get('ssl_ca_certs', None)
 
         ssl_kwarg_keys = [k for k in kwargs.keys() if k.startswith('ssl_')]
-        if not self.__use_ssl and ssl_kwarg_keys:
+        if self.__use_ssl is False and ssl_kwarg_keys:
             raise ConfigurationError("ssl has not been enabled but the "
                                      "following ssl parameters have been set: "
                                      "%s. Please set `ssl=True` or remove."
@@ -731,7 +688,7 @@ class MongoReplicaSetClient(common.BaseObject):
 
         if _connect:
             try:
-                self.refresh()
+                self.refresh(initial=True)
             except AutoReconnect, e:
                 # ConnectionFailure makes more sense here than AutoReconnect
                 raise ConnectionFailure(str(e))
@@ -754,21 +711,25 @@ class MongoReplicaSetClient(common.BaseObject):
                 raise ConfigurationError(str(exc))
 
         # Start the monitor after we know the configuration is correct.
-        if monitor_class:
-            self.__monitor = monitor_class(self)
-        elif self.__use_greenlets:
-            self.__monitor = MonitorGreenlet(self)
+        if not self.__monitor_class:
+            if self.__use_greenlets:
+                self.__monitor_class = MonitorGreenlet
+            else:
+                # Common case: monitor RS with a background thread.
+                self.__monitor_class = MonitorThread
+
+        if self.__use_greenlets:
+            # Greenlets don't need to lock around access to the monitor.
+            # A Greenlet can safely do:
+            # "if not self.__monitor: self.__monitor = monitor_class()"
+            # because it won't be interrupted between the check and the
+            # assignment.
+            self.__monitor_lock = DummyLock()
         else:
-            self.__monitor = MonitorThread(self)
-            self.__monitor.setDaemon(True)
-        register_monitor(self.__monitor)
+            self.__monitor_lock = threading.Lock()
 
         if _connect:
-            # Wait for the monitor to really start. Otherwise if we return to
-            # caller and caller forks immediately, the monitor could think it's
-            # still alive in the child process when it really isn't.
-            # See http://bugs.python.org/issue18418.
-            self.__monitor.start_sync()
+            self.__ensure_monitor()
 
     def _cached(self, dbname, coll, index):
         """Test if `index` is cached.
@@ -981,23 +942,64 @@ class MongoReplicaSetClient(common.BaseObject):
     @property
     def max_bson_size(self):
         """Returns the maximum size BSON object the connected primary
-        accepts in bytes. Defaults to 4MB in server < 1.7.4. Returns
-        0 if no primary is available.
+        accepts in bytes. Defaults to 16MB if not connected to a
+        primary.
         """
         rs_state = self.__rs_state
         if rs_state.primary_member:
             return rs_state.primary_member.max_bson_size
-        return 0
+        return common.MAX_BSON_SIZE
 
     @property
     def max_message_size(self):
         """Returns the maximum message size the connected primary
-        accepts in bytes. Returns 0 if no primary is available.
+        accepts in bytes. Defaults to 32MB if not connected to a
+        primary.
         """
         rs_state = self.__rs_state
         if rs_state.primary_member:
             return rs_state.primary_member.max_message_size
-        return 0
+        return common.MAX_MESSAGE_SIZE
+
+    @property
+    def min_wire_version(self):
+        """The minWireVersion reported by the server.
+
+        Returns ``0`` when connected to server versions prior to MongoDB 2.6.
+
+        .. versionadded:: 2.7
+        """
+        rs_state = self.__rs_state
+        if rs_state.primary_member:
+            return rs_state.primary_member.min_wire_version
+        return common.MIN_WIRE_VERSION
+
+    @property
+    def max_wire_version(self):
+        """The maxWireVersion reported by the server.
+
+        Returns ``0`` when connected to server versions prior to MongoDB 2.6.
+
+        .. versionadded:: 2.7
+        """
+        rs_state = self.__rs_state
+        if rs_state.primary_member:
+            return rs_state.primary_member.max_wire_version
+        return common.MAX_WIRE_VERSION
+
+    @property
+    def max_write_batch_size(self):
+        """The maxWriteBatchSize reported by the server.
+
+        Returns a default value when connected to server versions prior to
+        MongoDB 2.6.
+
+        .. versionadded:: 2.7
+        """
+        rs_state = self.__rs_state
+        if rs_state.primary_member:
+            return rs_state.primary_member.max_write_batch_size
+        return common.MAX_WRITE_BATCH_SIZE
 
     @property
     def auto_start_request(self):
@@ -1034,6 +1036,8 @@ class MongoReplicaSetClient(common.BaseObject):
             self.__net_timeout,
             self.__conn_timeout,
             self.__use_ssl,
+            wait_queue_timeout=self.__wait_queue_timeout,
+            wait_queue_multiple=self.__wait_queue_multiple,
             use_greenlets=self.__use_greenlets,
             ssl_keyfile=self.__ssl_keyfile,
             ssl_certfile=self.__ssl_certfile,
@@ -1064,9 +1068,28 @@ class MongoReplicaSetClient(common.BaseObject):
         is in progress, the work of refreshing the state is only performed
         once.
         """
-        self.__monitor.schedule_refresh()
+        if self.__closed:
+            raise InvalidOperation('MongoReplicaSetClient has been closed')
+
+        monitor = self.__ensure_monitor()
+        monitor.schedule_refresh()
         if sync:
-            self.__monitor.wait_for_refresh(timeout_seconds=5)
+            monitor.wait_for_refresh(timeout_seconds=self._refresh_timeout_sec)
+
+    def __ensure_monitor(self):
+        """Ensure the monitor is started, and return it."""
+        self.__monitor_lock.acquire()
+        try:
+            # Another thread can start the monitor while we wait for the lock.
+            if self.__monitor is not None and self.__monitor.isAlive():
+                return self.__monitor
+
+            monitor = self.__monitor = self.__monitor_class(self)
+            register_monitor(monitor)
+            monitor.start_sync()
+            return monitor
+        finally:
+            self.__monitor_lock.release()
 
     def __make_threadlocal(self):
         if self.__use_greenlets:
@@ -1074,20 +1097,29 @@ class MongoReplicaSetClient(common.BaseObject):
         else:
             return threading.local()
 
-    def refresh(self):
+    def refresh(self, initial=False):
         """Iterate through the existing host list, or possibly the
         seed list, to update the list of hosts and arbiters in this
         replica set.
         """
         # Only one thread / greenlet calls refresh() at a time: the one
         # running __init__() or the monitor. We won't modify the state, only
-        # replace it at the end.
+        # replace it.
         rs_state = self.__rs_state
+        try:
+            self.__rs_state = self.__create_rs_state(rs_state, initial)
+        except ConfigurationError, e:
+            self.__rs_state = rs_state.clone_with_error(e)
+            raise
+
+    def __create_rs_state(self, rs_state, initial):
         errors = []
         if rs_state.hosts:
             # Try first those hosts we think are up, then the down ones.
             nodes = sorted(
-                rs_state.hosts, key=lambda host: rs_state.get(host).up)
+                rs_state.hosts,
+                key=lambda host: bool(rs_state.get(host)),
+                reverse=True)
         else:
             nodes = self.__seeds
 
@@ -1111,18 +1143,20 @@ class MongoReplicaSetClient(common.BaseObject):
                 else:
                     response, pool, ping_time = self.__is_master(node)
                     new_member = Member(
-                        node, pool, response, MovingAverage([ping_time]), True)
+                        node, pool, response, MovingAverage([ping_time]))
 
                 # Check that this host is part of the given replica set.
-                set_name = response.get('setName')
-                # The 'setName' field isn't returned by mongod before 1.6.2
-                # so we can't assume that if it's missing this host isn't in
-                # the specified set.
-                if set_name and set_name != self.__name:
-                    host, port = node
-                    raise ConfigurationError("%s:%d is not a member of "
-                                             "replica set %s"
-                                             % (host, port, self.__name))
+                # Fail fast if we find a bad seed during __init__.
+                # Regular refreshes keep searching for valid nodes.
+                if response.get('setName') != self.__name:
+                    if initial:
+                        host, port = node
+                        raise ConfigurationError("%s:%d is not a member of "
+                                                 "replica set %s"
+                                                 % (host, port, self.__name))
+                    else:
+                        continue
+
                 if "arbiters" in response:
                     arbiters = set([
                         _partition_node(h) for h in response["arbiters"]])
@@ -1147,6 +1181,8 @@ class MongoReplicaSetClient(common.BaseObject):
             if hosts:
                 break
         else:
+            # We've changed nothing. On the next refresh, we'll try the same
+            # list of hosts: rs_state.hosts or self.__seeds.
             if errors:
                 raise AutoReconnect(', '.join(errors))
             raise ConfigurationError('No suitable hosts found')
@@ -1163,13 +1199,21 @@ class MongoReplicaSetClient(common.BaseObject):
                     sock_info = self.__socket(member, force=True)
                     res, ping_time = self.__simple_command(
                         sock_info, 'admin', {'ismaster': 1})
+
+                    if res.get('setName') != self.__name:
+                        # Not a member of this set.
+                        continue
+
                     member.pool.maybe_return_socket(sock_info)
                     new_member = member.clone_with(res, ping_time)
                 else:
                     res, connection_pool, ping_time = self.__is_master(host)
+                    if res.get('setName') != self.__name:
+                        # Not a member of this set.
+                        continue
+
                     new_member = Member(
-                        host, connection_pool, res, MovingAverage([ping_time]),
-                        True)
+                        host, connection_pool, res, MovingAverage([ping_time]))
 
                 members[host] = new_member
 
@@ -1181,6 +1225,15 @@ class MongoReplicaSetClient(common.BaseObject):
             if res['ismaster']:
                 writer = host
 
+        if not members:
+            # In the first loop, we connected to a member in the seed list
+            # and got a host list, but couldn't reach any members in that
+            # list.
+            raise AutoReconnect(
+                "Couldn't reach any hosts in %s. Replica set is"
+                " configured with internal hostnames or IPs?"
+                % list(hosts))
+
         if writer == rs_state.writer:
             threadlocal = self.__rs_state.threadlocal
         else:
@@ -1188,14 +1241,40 @@ class MongoReplicaSetClient(common.BaseObject):
             # no monotonic consistency can be promised now anyway.
             threadlocal = self.__make_threadlocal()
 
+        # Get list of hosts in the RS config, including unreachable ones.
+        # Prefer the primary's list, otherwise any member's list.
+        if writer:
+            response = members[writer].ismaster_response
+        elif members:
+            response = members.values()[0].ismaster_response
+        else:
+            response = {}
+
+        final_host_list = (
+            response.get('hosts', [])
+            + response.get('passives', []))
+
         # Replace old state with new.
-        self.__rs_state = RSState(threadlocal, members, arbiters, writer)
+        return RSState(
+            threadlocal,
+            [_partition_node(h) for h in final_host_list],
+            members,
+            arbiters,
+            writer)
+
+    def __get_rs_state(self):
+        rs_state = self.__rs_state
+        if rs_state.exc:
+            raise rs_state.exc
+
+        return rs_state
 
     def __find_primary(self):
         """Returns a connection to the primary of this replica set,
         if one exists, or raises AutoReconnect.
         """
-        primary = self.__rs_state.primary_member
+        rs_state = self.__get_rs_state()
+        primary = rs_state.primary_member
         if primary:
             return primary
 
@@ -1204,7 +1283,7 @@ class MongoReplicaSetClient(common.BaseObject):
 
         # Try again. This time copy the RSState reference so we're guaranteed
         # primary_member and error_message are from the same state.
-        rs_state = self.__rs_state
+        rs_state = self.__get_rs_state()
         if rs_state.primary_member:
             return rs_state.primary_member
 
@@ -1230,16 +1309,11 @@ class MongoReplicaSetClient(common.BaseObject):
         """Ensure this client instance is connected to a primary.
         """
         # This may be the first time we're connecting to the set.
-        if self.__monitor and not self.__monitor.started:
-            try:
-                self.__monitor.start()
-            # Minor race condition. It's possible that two (or more)
-            # threads could call monitor.start() consecutively. Just pass.
-            except RuntimeError:
-                pass
+        self.__ensure_monitor()
+
         if sync:
             rs_state = self.__rs_state
-            if not rs_state.primary_member:
+            if rs_state.exc or not rs_state.primary_member:
                 self.__schedule_refresh(sync)
 
     def disconnect(self):
@@ -1258,23 +1332,26 @@ class MongoReplicaSetClient(common.BaseObject):
         """Close this client instance.
 
         This method first terminates the replica set monitor, then disconnects
-        from all members of the replica set.
-        
+        from all members of the replica set. No further operations are
+        permitted on this client.
+
         .. warning:: This method stops the replica set monitor task. The
            replica set monitor is required to properly handle replica set
            configuration changes, including a failure of the primary.
-           Once :meth:`~close` is called this client instance must not be reused.
+           Once :meth:`~close` is called this client instance must not be
+           reused.
 
         .. versionchanged:: 2.2.1
            The :meth:`close` method now terminates the replica set monitor.
         """
-        if self.__monitor:
-            self.__monitor.shutdown()
-            # Use a reasonable timeout.
-            self.__monitor.join(1.0)
-            self.__monitor = None
-
+        self.__closed = True
         self.__rs_state = RSState(self.__make_threadlocal())
+
+        monitor, self.__monitor = self.__monitor, None
+        if monitor:
+            monitor.shutdown()
+            # Use a reasonable timeout.
+            monitor.join(1.0)
 
     def alive(self):
         """Return ``False`` if there has been an error communicating with the
@@ -1285,8 +1362,7 @@ class MongoReplicaSetClient(common.BaseObject):
         socket if it's in a request, or a random idle socket if it's not in a
         request) from the primary's connection pool and checks whether calling
         select_ on it raises an error. If there are currently no idle sockets,
-        or if there is no known primary, :meth:`alive` will attempt to actually
-        find and connect to the primary.
+        :meth:`alive` attempts to connect a new socket.
 
         A more certain way to determine primary availability is to ping it::
 
@@ -1296,23 +1372,24 @@ class MongoReplicaSetClient(common.BaseObject):
         """
         # In the common case, a socket is available and was used recently, so
         # calling select() on it is a reasonable attempt to see if the OS has
-        # reported an error. Note this can be wasteful: __socket implicitly
-        # calls select() if the socket hasn't been checked in the last second,
-        # or it may create a new socket, in which case calling select() is
-        # redundant.
-        member, sock_info = None, None
+        # reported an error.
+        primary, sock_info = None, None
         try:
             try:
-                member = self.__find_primary()
-                sock_info = self.__socket(member)
-                return not pool._closed(sock_info.sock)
+                rs_state = self.__get_rs_state()
+                primary = rs_state.primary_member
+                if not primary:
+                    return False
+                else:
+                    sock_info = self.__socket(primary)
+                    return not pool._closed(sock_info.sock)
             except (socket.error, ConnectionFailure):
                 return False
         finally:
-            if member and sock_info:
-                member.pool.maybe_return_socket(sock_info)
+            if primary:
+                primary.pool.maybe_return_socket(sock_info)
 
-    def __check_response_to_last_error(self, response):
+    def __check_response_to_last_error(self, response, is_command):
         """Check a response to a lastError message for errors.
 
         `response` is a byte string representing a response to the message.
@@ -1323,24 +1400,26 @@ class MongoReplicaSetClient(common.BaseObject):
         response = helpers._unpack_response(response)
 
         assert response["number_returned"] == 1
-        error = response["data"][0]
+        result = response["data"][0]
 
-        helpers._check_command_response(error, self.disconnect)
+        helpers._check_command_response(result, self.disconnect)
 
-        error_msg = error.get("err", "")
+        # write commands - skip getLastError checking
+        if is_command:
+            return result
+
+        # getLastError
+        error_msg = result.get("err", "")
         if error_msg is None:
-            return error
+            return result
         if error_msg.startswith("not master"):
             self.disconnect()
             raise AutoReconnect(error_msg)
 
-        if "code" in error:
-            if error["code"] in (11000, 11001, 12582):
-                raise DuplicateKeyError(error["err"], error["code"])
-            else:
-                raise OperationFailure(error["err"], error["code"])
-        else:
-            raise OperationFailure(error["err"])
+        code = result.get("code")
+        if code in (11000, 11001, 12582):
+            raise DuplicateKeyError(result["err"], code, result)
+        raise OperationFailure(result["err"], code, result)
 
     def __recv_data(self, length, sock_info):
         """Lowest level receive operation.
@@ -1383,18 +1462,18 @@ class MongoReplicaSetClient(common.BaseObject):
         if len(msg) == 3:
             request_id, data, max_doc_size = msg
             if max_doc_size > max_size:
-                raise InvalidDocument("BSON document too large (%d bytes)"
-                                      " - the connected server supports"
-                                      " BSON document sizes up to %d"
-                                      " bytes." %
-                                      (max_doc_size, max_size))
+                raise DocumentTooLarge("BSON document too large (%d bytes)"
+                                       " - the connected server supports"
+                                       " BSON document sizes up to %d"
+                                       " bytes." %
+                                       (max_doc_size, max_size))
             return (request_id, data)
         # get_more and kill_cursors messages
         # don't include BSON documents.
         return msg
 
-    def _send_message(self, msg,
-                      with_last_error=False, _connection_to_use=None):
+    def _send_message(self, msg, with_last_error=False,
+                      command=False, _connection_to_use=None):
         """Say something to Mongo.
 
         Raises ConnectionFailure if the message cannot be sent. Raises
@@ -1413,7 +1492,7 @@ class MongoReplicaSetClient(common.BaseObject):
         if _connection_to_use in (None, -1):
             member = self.__find_primary()
         else:
-            member = self.__rs_state.get(_connection_to_use)
+            member = self.__get_rs_state().get(_connection_to_use)
 
         sock_info = None
         try:
@@ -1430,7 +1509,7 @@ class MongoReplicaSetClient(common.BaseObject):
                 rv = None
                 if with_last_error:
                     response = self.__recv_msg(1, rqst_id, sock_info)
-                    rv = self.__check_response_to_last_error(response)
+                    rv = self.__check_response_to_last_error(response, command)
                 return rv
             except OperationFailure:
                 raise
@@ -1512,7 +1591,7 @@ class MongoReplicaSetClient(common.BaseObject):
         """
         self._ensure_connected()
 
-        rs_state = self.__rs_state
+        rs_state = self.__get_rs_state()
         tag_sets = kwargs.get('tag_sets', [{}])
         mode = kwargs.get('read_preference', ReadPreference.PRIMARY)
         if _must_use_master:
@@ -1520,10 +1599,12 @@ class MongoReplicaSetClient(common.BaseObject):
             tag_sets = [{}]
 
         if not rs_state.primary_member:
-            # Primary was down last we checked. Start a refresh if one is not
-            # already in progress. If caller requested the primary, wait to
-            # see if it's up, otherwise continue with known-good members.
-            sync = (mode == ReadPreference.PRIMARY)
+            # If we were initialized with _connect=False then connect now.
+            # Otherwise, the primary was down last we checked. Start a refresh
+            # if one is not already in progress. If caller requested the
+            # primary, wait to see if it's up, otherwise continue with
+            # known-good members.
+            sync = (rs_state.initial or mode == ReadPreference.PRIMARY)
             self.__schedule_refresh(sync=sync)
             rs_state = self.__rs_state
 
@@ -1591,8 +1672,7 @@ class MongoReplicaSetClient(common.BaseObject):
                 break
 
             try:
-                # Sets member.up False on failure, so select_member won't try
-                # it again.
+                # Removes member on failure, so select_member won't retry it.
                 response = self.__try_read(member, msg, **kwargs)
 
                 # Success
@@ -1602,6 +1682,9 @@ class MongoReplicaSetClient(common.BaseObject):
                     rs_state.pin_host(member.host, mode, tag_sets, latency)
                 return member.host, response
             except AutoReconnect, why:
+                if mode == ReadPreference.PRIMARY:
+                    raise
+
                 errors.append(str(why))
                 members.remove(member)
 
@@ -1618,12 +1701,23 @@ class MongoReplicaSetClient(common.BaseObject):
         if tag_sets != [{}]:
             msg += " and tags " + repr(tag_sets)
 
+        # Format a message like:
+        # 'No replica set secondary available for query with ReadPreference
+        # SECONDARY. host:27018: timed out, host:27019: timed out'.
+        if errors:
+            msg += ". " + ', '.join(errors)
+
         raise AutoReconnect(msg, errors)
 
     def _exhaust_next(self, sock_info):
         """Used with exhaust cursors to get the next batch off the socket.
+
+        Can raise AutoReconnect.
         """
-        return self.__recv_msg(1, None, sock_info)
+        try:
+            return self.__recv_msg(1, None, sock_info)
+        except socket.error, e:
+            raise AutoReconnect(str(e))
 
     def start_request(self):
         """Ensure the current thread or greenlet always uses the same socket
@@ -1744,13 +1838,15 @@ class MongoReplicaSetClient(common.BaseObject):
     def server_info(self):
         """Get information about the MongoDB primary we're connected to.
         """
-        return self.admin.command("buildinfo")
+        return self.admin.command("buildinfo",
+                                  read_preference=ReadPreference.PRIMARY)
 
     def database_names(self):
         """Get a list of the names of all databases on the connected server.
         """
         return [db["name"] for db in
-                self.admin.command("listDatabases")["databases"]]
+                self.admin.command("listDatabases",
+                    read_preference=ReadPreference.PRIMARY)["databases"]]
 
     def drop_database(self, name_or_database):
         """Drop a database.
@@ -1772,7 +1868,8 @@ class MongoReplicaSetClient(common.BaseObject):
                             "%s or Database" % (basestring.__name__,))
 
         self._purge_index(name)
-        self[name].command("dropDatabase")
+        self[name].command("dropDatabase",
+                           read_preference=ReadPreference.PRIMARY)
 
     def copy_database(self, from_name, to_name,
                       from_host=None, username=None, password=None):
@@ -1818,12 +1915,15 @@ class MongoReplicaSetClient(common.BaseObject):
 
             if username is not None:
                 nonce = self.admin.command("copydbgetnonce",
-                                           fromhost=from_host)["nonce"]
+                    read_preference=ReadPreference.PRIMARY,
+                    fromhost=from_host)["nonce"]
                 command["username"] = username
                 command["nonce"] = nonce
                 command["key"] = auth._auth_key(nonce, username, password)
 
-            return self.admin.command("copydb", **command)
+            return self.admin.command("copydb",
+                                      read_preference=ReadPreference.PRIMARY,
+                                      **command)
         finally:
             self.end_request()
 

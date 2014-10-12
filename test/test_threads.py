@@ -1,4 +1,4 @@
-# Copyright 2009-2012 10gen, Inc.
+# Copyright 2009-2014 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,22 +20,12 @@ import traceback
 
 from nose.plugins.skip import SkipTest
 
-from test.utils import server_started_with_auth, joinall, RendezvousThread
+from test.utils import (joinall, remove_all_users,
+                        server_started_with_auth, RendezvousThread)
 from test.test_client import get_client
-from pymongo.mongo_client import MongoClient
-from pymongo.replica_set_connection import MongoReplicaSetClient
+from test.utils import get_pool
 from pymongo.pool import SocketInfo, _closed
 from pymongo.errors import AutoReconnect, OperationFailure
-
-
-def get_pool(client):
-    if isinstance(client, MongoClient):
-        return client._MongoClient__pool
-    elif isinstance(client, MongoReplicaSetClient):
-        rs_state = client._MongoReplicaSetClient__rs_state
-        return rs_state[rs_state.writer].pool
-    else:
-        raise TypeError(str(client))
 
 
 class AutoAuthenticateThreads(threading.Thread):
@@ -150,8 +140,8 @@ class FindPauseFind(RendezvousThread):
         # acquire a socket
         list(self.collection.find())
 
-        self.pool = get_pool(self.collection.database.connection)
-        socket_info = self.pool._get_request_state()
+        pool = get_pool(self.collection.database.connection)
+        socket_info = pool._get_request_state()
         assert isinstance(socket_info, SocketInfo)
         self.request_sock = socket_info.sock
         assert not _closed(self.request_sock)
@@ -161,12 +151,12 @@ class FindPauseFind(RendezvousThread):
         # because it's not our request socket anymore
         assert _closed(self.request_sock)
 
-        # if disconnect() properly closed all threads' request sockets, then
-        # this won't raise AutoReconnect because it will acquire a new socket
-        assert self.request_sock == self.pool._get_request_state().sock
+        # if disconnect() properly replaced the pool, then this won't raise
+        # AutoReconnect because it will acquire a new socket
         list(self.collection.find())
         assert self.collection.database.connection.in_request()
-        assert self.request_sock != self.pool._get_request_state().sock
+        pool = get_pool(self.collection.database.connection)
+        assert self.request_sock != pool._get_request_state().sock
 
 
 class BaseTestThreads(object):
@@ -269,7 +259,7 @@ class BaseTestThreads(object):
         assert isinstance(socket_info, SocketInfo)
         request_sock = socket_info.sock
 
-        state = FindPauseFind.create_shared_state(nthreads=40)
+        state = FindPauseFind.create_shared_state(nthreads=10)
 
         threads = [
             FindPauseFind(collection, state)
@@ -330,18 +320,21 @@ class BaseTestThreadsAuth(object):
         if not server_started_with_auth(client):
             raise SkipTest("Authentication is not enabled on server")
         self.client = client
-        self.client.admin.system.users.remove({})
-        self.client.admin.add_user('admin-user', 'password')
+        self.client.admin.add_user('admin-user', 'password',
+                                   roles=['clusterAdmin',
+                                          'dbAdminAnyDatabase',
+                                          'readWriteAnyDatabase',
+                                          'userAdminAnyDatabase'])
         self.client.admin.authenticate("admin-user", "password")
-        self.client.auth_test.system.users.remove({})
-        self.client.auth_test.add_user("test-user", "password")
+        self.client.auth_test.add_user("test-user", "password",
+                                       roles=['readWrite'])
 
     def tearDown(self):
         # Remove auth users from databases
         self.client.admin.authenticate("admin-user", "password")
-        self.client.admin.system.users.remove({})
-        self.client.auth_test.system.users.remove({})
+        remove_all_users(self.client.auth_test)
         self.client.drop_database('auth_test')
+        remove_all_users(self.client.admin)
         # Clear client reference so that RSC's monitor thread
         # dies.
         self.client = None

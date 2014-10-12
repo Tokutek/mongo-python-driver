@@ -18,9 +18,11 @@ MongoDB, you can start it like so:
 
    aggregation
    authentication
+   bulk
    custom_type
    geo
    gevent
    gridfs
    high_availability
+   mod_wsgi
    requests

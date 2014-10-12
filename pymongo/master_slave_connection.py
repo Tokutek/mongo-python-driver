@@ -1,4 +1,4 @@
-# Copyright 2009-2012 10gen, Inc.
+# Copyright 2009-2014 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -135,6 +135,36 @@ class MasterSlaveConnection(BaseObject):
         """
         return self.master.max_message_size
 
+    @property
+    def min_wire_version(self):
+        """The minWireVersion reported by the server.
+
+        Returns ``0`` when connected to server versions prior to MongoDB 2.6.
+
+        .. versionadded:: 2.7
+        """
+        return self.master.min_wire_version
+
+    @property
+    def max_wire_version(self):
+        """The maxWireVersion reported by the server.
+
+        Returns ``0`` when connected to server versions prior to MongoDB 2.6.
+
+        .. versionadded:: 2.7
+        """
+        return self.master.max_wire_version
+
+    @property
+    def max_write_batch_size(self):
+        """The maxWriteBatchSize reported by the server.
+
+        Returns a default value when connected to server versions prior to
+        MongoDB 2.6.
+
+        .. versionadded:: 2.7
+        """
+        return self.master.max_write_batch_size
 
     def disconnect(self):
         """Disconnect from MongoDB.
@@ -168,7 +198,8 @@ class MasterSlaveConnection(BaseObject):
     # that killcursor operations can be sent to the same instance on which
     # the cursor actually resides...
     def _send_message(self, message,
-                      with_last_error=False, _connection_to_use=None):
+                      with_last_error=False,
+                      command=False, _connection_to_use=None):
         """Say something to Mongo.
 
         Sends a message on the Master connection. This is used for inserts,
@@ -183,9 +214,10 @@ class MasterSlaveConnection(BaseObject):
           - `safe`: perform a getLastError after sending the message
         """
         if _connection_to_use is None or _connection_to_use == -1:
-            return self.__master._send_message(message, with_last_error)
+            return self.__master._send_message(message,
+                                               with_last_error, command)
         return self.__slaves[_connection_to_use]._send_message(
-            message, with_last_error, check_primary=False)
+            message, with_last_error, command, check_primary=False)
 
     # _connection_to_use is a hack that we need to include to make sure
     # that getmore operations can be sent to the same instance on which

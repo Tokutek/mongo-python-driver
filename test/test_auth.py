@@ -1,4 +1,4 @@
-# Copyright 2013 10gen, Inc.
+# Copyright 2013-2014 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -27,7 +27,7 @@ from nose.plugins.skip import SkipTest
 
 from pymongo import MongoClient, MongoReplicaSetClient
 from pymongo.auth import HAVE_KERBEROS
-from pymongo.errors import OperationFailure
+from pymongo.errors import OperationFailure, ConfigurationError
 from pymongo.read_preferences import ReadPreference
 from test import version, host, port
 from test.utils import is_mongos, server_started_with_auth
@@ -166,28 +166,64 @@ class TestSASL(unittest.TestCase):
     def test_sasl_plain(self):
 
         client = MongoClient(SASL_HOST, SASL_PORT)
-        self.assertTrue(client.test.authenticate(SASL_USER, SASL_PASS,
+        self.assertTrue(client.ldap.authenticate(SASL_USER, SASL_PASS,
                                                  SASL_DB, 'PLAIN'))
+        client.ldap.test.find_one()
 
         uri = ('mongodb://%s:%s@%s:%d/?authMechanism=PLAIN;'
                'authSource=%s' % (quote_plus(SASL_USER),
                                   quote_plus(SASL_PASS),
                                   SASL_HOST, SASL_PORT, SASL_DB))
         client = MongoClient(uri)
+        client.ldap.test.find_one()
 
         set_name = client.admin.command('ismaster').get('setName')
         if set_name:
             client = MongoReplicaSetClient(SASL_HOST,
                                            port=SASL_PORT,
                                            replicaSet=set_name)
-            self.assertTrue(client.test.authenticate(SASL_USER, SASL_PASS,
+            self.assertTrue(client.ldap.authenticate(SASL_USER, SASL_PASS,
                                                      SASL_DB, 'PLAIN'))
+            client.ldap.test.find_one()
+
             uri = ('mongodb://%s:%s@%s:%d/?authMechanism=PLAIN;'
                    'authSource=%s;replicaSet=%s' % (quote_plus(SASL_USER),
                                                     quote_plus(SASL_PASS),
                                                     SASL_HOST, SASL_PORT,
                                                     SASL_DB, str(set_name)))
             client = MongoReplicaSetClient(uri)
+            client.ldap.test.find_one()
+
+    def test_sasl_plain_bad_credentials(self):
+
+        client = MongoClient(SASL_HOST, SASL_PORT)
+
+        # Bad username
+        self.assertRaises(OperationFailure, client.ldap.authenticate,
+                          'not-user', SASL_PASS, SASL_DB, 'PLAIN')
+        self.assertRaises(OperationFailure, client.ldap.test.find_one)
+        self.assertRaises(OperationFailure, client.ldap.test.insert,
+                          {"failed": True})
+
+        # Bad password
+        self.assertRaises(OperationFailure, client.ldap.authenticate,
+                          SASL_USER, 'not-pwd', SASL_DB, 'PLAIN')
+        self.assertRaises(OperationFailure, client.ldap.test.find_one)
+        self.assertRaises(OperationFailure, client.ldap.test.insert,
+                          {"failed": True})
+
+        def auth_string(user, password):
+            uri = ('mongodb://%s:%s@%s:%d/?authMechanism=PLAIN;'
+                   'authSource=%s' % (quote_plus(user),
+                                      quote_plus(password),
+                                      SASL_HOST, SASL_PORT, SASL_DB))
+            return uri
+
+        # Just assert that we raise the right exception
+        self.assertRaises(ConfigurationError, MongoClient,
+                          auth_string('not-user', SASL_PASS))
+        self.assertRaises(ConfigurationError, MongoClient,
+                          auth_string(SASL_USER, 'not-pwd'))
 
 
 class TestAuthURIOptions(unittest.TestCase):
@@ -201,8 +237,14 @@ class TestAuthURIOptions(unittest.TestCase):
             raise SkipTest('Authentication is not enabled on server')
         response = client.admin.command('ismaster')
         self.set_name = str(response.get('setName', ''))
-        client.pymongo_test.add_user('user', 'pass')
-        client.admin.add_user('admin', 'pass')
+        client.admin.add_user('admin', 'pass', roles=['userAdminAnyDatabase',
+                                                      'dbAdminAnyDatabase',
+                                                      'readWriteAnyDatabase',
+                                                      'clusterAdmin'])
+        client.admin.authenticate('admin', 'pass')
+        client.pymongo_test.add_user('user', 'pass',
+                                     roles=['userAdmin', 'readWrite'])
+
         if self.set_name:
             # GLE requires authentication.
             client.admin.authenticate('admin', 'pass')
@@ -214,9 +256,11 @@ class TestAuthURIOptions(unittest.TestCase):
 
     def tearDown(self):
         self.client.admin.authenticate('admin', 'pass')
-        self.client.pymongo_test.system.users.remove()
-        self.client.admin.system.users.remove()
+        self.client.pymongo_test.remove_user('user')
+        self.client.admin.remove_user('admin')
+        self.client.pymongo_test.logout()
         self.client.admin.logout()
+        self.client = None
 
     def test_uri_options(self):
         # Test default to admin
@@ -274,7 +318,9 @@ class TestDelegatedAuth(unittest.TestCase):
             raise SkipTest('Delegated authentication requires MongoDB >= 2.4.0')
         if not server_started_with_auth(self.client):
             raise SkipTest('Authentication is not enabled on server')
-        # Give admin all priviledges.
+        if version.at_least(self.client, (2, 5, 3, -1)):
+            raise SkipTest('Delegated auth does not exist in MongoDB >= 2.5.3')
+        # Give admin all privileges.
         self.client.admin.add_user('admin', 'pass',
                                    roles=['readAnyDatabase',
                                           'readWriteAnyDatabase',
@@ -284,11 +330,12 @@ class TestDelegatedAuth(unittest.TestCase):
 
     def tearDown(self):
         self.client.admin.authenticate('admin', 'pass')
-        self.client.pymongo_test.system.users.remove()
-        self.client.pymongo_test2.system.users.remove()
+        self.client.pymongo_test.remove_user('user')
+        self.client.pymongo_test2.remove_user('user')
         self.client.pymongo_test2.foo.remove()
-        self.client.admin.system.users.remove()
+        self.client.admin.remove_user('admin')
         self.client.admin.logout()
+        self.client = None
 
     def test_delegated_auth(self):
         self.client.admin.authenticate('admin', 'pass')

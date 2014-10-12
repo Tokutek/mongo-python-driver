@@ -1,4 +1,4 @@
-# Copyright 2013 10gen, Inc.
+# Copyright 2013-2014 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,12 +14,15 @@
 
 """Authentication helpers."""
 
+import hmac
 try:
     import hashlib
     _MD5 = hashlib.md5
+    _DMOD = _MD5
 except ImportError:  # for Python < 2.5
     import md5
     _MD5 = md5.new
+    _DMOD = md5
 
 HAVE_KERBEROS = True
 try:
@@ -28,11 +31,12 @@ except ImportError:
     HAVE_KERBEROS = False
 
 from bson.binary import Binary
+from bson.py3compat import b
 from bson.son import SON
 from pymongo.errors import ConfigurationError, OperationFailure
 
 
-MECHANISMS = ('GSSAPI', 'MONGODB-CR', 'MONGODB-X509', 'PLAIN')
+MECHANISMS = frozenset(['GSSAPI', 'MONGODB-CR', 'MONGODB-X509', 'PLAIN'])
 """The authentication mechanisms supported by PyMongo."""
 
 
@@ -55,7 +59,7 @@ def _password_digest(username, password):
         raise TypeError("password must be an instance "
                         "of %s" % (basestring.__name__,))
     if len(password) == 0:
-        raise TypeError("password can't be empty")
+        raise ValueError("password can't be empty")
     if not isinstance(username, basestring):
         raise TypeError("username must be an instance "
                         "of %s" % (basestring.__name__,))
@@ -83,8 +87,9 @@ def _authenticate_gssapi(credentials, sock_info, cmd_func):
         dummy, username, gsn = credentials
         # Starting here and continuing through the while loop below - establish
         # the security context. See RFC 4752, Section 3.1, first paragraph.
-        result, ctx = kerberos.authGSSClientInit(gsn + '@' + sock_info.host,
-                                                 kerberos.GSS_C_MUTUAL_FLAG)
+        result, ctx = kerberos.authGSSClientInit(
+            gsn + '@' + sock_info.host, gssflags=kerberos.GSS_C_MUTUAL_FLAG)
+
         if result != kerberos.AUTH_GSS_COMPLETE:
             raise OperationFailure('Kerberos context failed to initialize.')
 
@@ -167,6 +172,29 @@ def _authenticate_plain(credentials, sock_info, cmd_func):
     cmd_func(sock_info, source, cmd)
 
 
+def _authenticate_cram_md5(credentials, sock_info, cmd_func):
+    """Authenticate using CRAM-MD5 (RFC 2195)
+    """
+    source, username, password = credentials
+    # The password used as the mac key is the
+    # same as what we use for MONGODB-CR
+    passwd = _password_digest(username, password)
+    cmd = SON([('saslStart', 1),
+               ('mechanism', 'CRAM-MD5'),
+               ('payload', Binary(b(''))),
+               ('autoAuthorize', 1)])
+    response, _ = cmd_func(sock_info, source, cmd)
+    # MD5 as implicit default digest for digestmod is deprecated
+    # in python 3.4
+    mac = hmac.HMAC(key=passwd.encode('utf-8'), digestmod=_DMOD)
+    mac.update(response['payload'])
+    challenge = username.encode('utf-8') + b(' ') + b(mac.hexdigest())
+    cmd = SON([('saslContinue', 1),
+               ('conversationId', response['conversationId']),
+               ('payload', Binary(challenge))])
+    cmd_func(sock_info, source, cmd)
+
+
 def _authenticate_x509(credentials, sock_info, cmd_func):
     """Authenticate using MONGODB-X509.
     """
@@ -195,6 +223,7 @@ def _authenticate_mongo_cr(credentials, sock_info, cmd_func):
 
 
 _AUTH_MAP = {
+    'CRAM-MD5': _authenticate_cram_md5,
     'GSSAPI': _authenticate_gssapi,
     'MONGODB-CR': _authenticate_mongo_cr,
     'MONGODB-X509': _authenticate_x509,

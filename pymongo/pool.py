@@ -1,4 +1,4 @@
-# Copyright 2011-2012 10gen, Inc.
+# Copyright 2011-2014 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you
 # may not use this file except in compliance with the License.  You
@@ -141,12 +141,6 @@ class Pool:
         # Can override for testing: 0 to always check, None to never check.
         self._check_interval_seconds = 1
 
-        if use_greenlets and not thread_util.have_gevent:
-            raise ConfigurationError(
-                "The Gevent module is not available. "
-                "Install the gevent package from PyPI."
-            )
-
         self.sockets = set()
         self.lock = threading.Lock()
 
@@ -169,10 +163,16 @@ class Pool:
         if HAS_SSL and use_ssl and not ssl_cert_reqs:
             self.ssl_cert_reqs = ssl.CERT_NONE
 
-        self._ident = thread_util.create_ident(use_greenlets)
-
         # Map self._ident.get() -> request socket
         self._tid_to_sock = {}
+
+        if use_greenlets and not thread_util.have_gevent:
+            raise ConfigurationError(
+                "The Gevent module is not available. "
+                "Install the gevent package from PyPI."
+            )
+
+        self._ident = thread_util.create_ident(use_greenlets)
 
         # Count the number of calls to start_request() per thread or greenlet
         self._request_counter = thread_util.Counter(use_greenlets)
@@ -204,13 +204,13 @@ class Pool:
         for sock_info in sockets:
             sock_info.close()
 
-    def create_connection(self, pair):
-        """Connect to *pair* and return the socket object.
+    def create_connection(self):
+        """Connect and return a socket object.
 
         This is a modified version of create_connection from
         CPython >=2.6.
         """
-        host, port = pair or self.pair
+        host, port = self.pair
 
         # Check if dealing with a unix domain socket
         if host.endswith('.sock'):
@@ -257,13 +257,13 @@ class Pool:
             # support IPv6 at all.
             raise socket.error('getaddrinfo failed')
 
-    def connect(self, pair):
+    def connect(self):
         """Connect to Mongo and return a new (connected) socket. Note that the
            pool does not keep a reference to the socket -- you must call
            return_socket() when you're done with it.
         """
-        sock = self.create_connection(pair)
-        hostname = (pair or self.pair)[0]
+        sock = self.create_connection()
+        hostname = self.pair[0]
 
         if self.use_ssl:
             try:
@@ -283,7 +283,7 @@ class Pool:
         sock.settimeout(self.net_timeout)
         return SocketInfo(sock, self.pool_id, hostname)
 
-    def get_socket(self, pair=None, force=False):
+    def get_socket(self, force=False):
         """Get a socket from the pool.
 
         Returns a :class:`SocketInfo` object wrapping a connected
@@ -291,7 +291,6 @@ class Pool:
         the pool or freshly created.
 
         :Parameters:
-          - `pair`: optional (hostname, port) tuple
           - `force`: optional boolean, forces a connection to be returned
               without blocking, even if `max_size` has been reached.
         """
@@ -305,7 +304,7 @@ class Pool:
         req_state = self._get_request_state()
         if req_state not in (NO_SOCKET_YET, NO_REQUEST):
             # There's a socket for this request, check it and return it
-            checked_sock = self._check(req_state, pair)
+            checked_sock = self._check(req_state)
             if checked_sock != req_state:
                 self._set_request_state(checked_sock)
 
@@ -324,28 +323,34 @@ class Pool:
         elif not self._socket_semaphore.acquire(True, self.wait_queue_timeout):
             self._raise_wait_queue_timeout()
 
-        sock_info, from_pool = None, None
+        # We've now acquired the semaphore and must release it on error.
         try:
+            sock_info, from_pool = None, None
             try:
-                # set.pop() isn't atomic in Jython less than 2.7, see
-                # http://bugs.jython.org/issue1854
-                self.lock.acquire()
-                sock_info, from_pool = self.sockets.pop(), True
-            finally:
-                self.lock.release()
-        except KeyError:
-            sock_info, from_pool = self.connect(pair), False
+                try:
+                    # set.pop() isn't atomic in Jython less than 2.7, see
+                    # http://bugs.jython.org/issue1854
+                    self.lock.acquire()
+                    sock_info, from_pool = self.sockets.pop(), True
+                finally:
+                    self.lock.release()
+            except KeyError:
+                sock_info, from_pool = self.connect(), False
 
-        if from_pool:
-            sock_info = self._check(sock_info, pair)
+            if from_pool:
+                sock_info = self._check(sock_info)
 
-        sock_info.forced = forced
+            sock_info.forced = forced
 
-        if req_state == NO_SOCKET_YET:
-            # start_request has been called but we haven't assigned a socket to
-            # the request yet. Let's use this socket for this request until
-            # end_request.
-            self._set_request_state(sock_info)
+            if req_state == NO_SOCKET_YET:
+                # start_request has been called but we haven't assigned a
+                # socket to the request yet. Let's use this socket for this
+                # request until end_request.
+                self._set_request_state(sock_info)
+        except:
+            if not forced:
+                self._socket_semaphore.release()
+            raise
 
         sock_info.last_checkout = time.time()
         return sock_info
@@ -387,8 +392,8 @@ class Pool:
     def maybe_return_socket(self, sock_info):
         """Return the socket to the pool unless it's the request socket.
         """
-        # These sentinel values should only be used internally.
-        assert sock_info not in (NO_REQUEST, NO_SOCKET_YET)
+        if sock_info in (NO_REQUEST, NO_SOCKET_YET):
+            return
 
         if self.pid != os.getpid():
             if not sock_info.forced:
@@ -425,7 +430,7 @@ class Pool:
         else:
             self._socket_semaphore.release()
 
-    def _check(self, sock_info, pair):
+    def _check(self, sock_info):
         """This side-effecty function checks if this pool has been reset since
         the last time this socket was used, or if the socket has been closed by
         some external network error, and if so, attempts to create a new socket.
@@ -462,7 +467,7 @@ class Pool:
             return sock_info
         else:
             try:
-                return self.connect(pair)
+                return self.connect()
             except socket.error:
                 self.reset()
                 raise

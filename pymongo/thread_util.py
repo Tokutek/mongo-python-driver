@@ -1,4 +1,4 @@
-# Copyright 2012 10gen, Inc.
+# Copyright 2012-2014 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -33,6 +33,7 @@ try:
         from gevent.coros import BoundedSemaphore as GeventBoundedSemaphore
 
     from gevent.greenlet import SpawnedLink
+    from gevent.event import Event as GeventEvent
 
 except ImportError:
     have_gevent = False
@@ -42,6 +43,14 @@ from pymongo.errors import ExceededMaxWaiters
 
 # Do we have to work around http://bugs.python.org/issue1868?
 issue1868 = (sys.version_info[:3] <= (2, 7, 0))
+
+
+class DummyLock(object):
+    def acquire(self):
+        pass
+
+    def release(self):
+        pass
 
 
 class Ident(object):
@@ -67,20 +76,13 @@ class Ident(object):
 
 
 class ThreadIdent(Ident):
-    class _DummyLock(object):
-        def acquire(self):
-            pass
-
-        def release(self):
-            pass
-
     def __init__(self):
         super(ThreadIdent, self).__init__()
         self._local = threading.local()
         if issue1868:
             self._lock = threading.Lock()
         else:
-            self._lock = ThreadIdent._DummyLock()
+            self._lock = DummyLock()
 
     # We watch for thread-death using a weakref callback to a thread local.
     # Weakrefs are permitted on subclasses of object but not object() itself.
@@ -182,6 +184,36 @@ class Counter(object):
 
     def get(self):
         return self._counters.get(self.ident.get(), 0)
+
+
+class Future(object):
+    """Minimal backport of concurrent.futures.Future.
+
+    event_class makes this Future adaptable for Gevent and other frameworks.
+    """
+    def __init__(self, event_class):
+        self._event = event_class()
+        self._result = None
+        self._exception = None
+
+    def set_result(self, result):
+        self._result = result
+        self._event.set()
+
+    def set_exception(self, exc):
+        if hasattr(exc, 'with_traceback'):
+            # Python 3: avoid potential reference cycle.
+            self._exception = exc.with_traceback(None)
+        else:
+            self._exception = exc
+        self._event.set()
+
+    def result(self):
+        self._event.wait()
+        if self._exception:
+            raise self._exception
+        else:
+            return self._result
 
 
 ### Begin backport from CPython 3.2 for timeout support for Semaphore.acquire
@@ -301,3 +333,10 @@ def create_semaphore(max_size, max_waiters, use_greenlets):
             return BoundedSemaphore(max_size)
         else:
             return MaxWaitersBoundedSemaphoreThread(max_size, max_waiters)
+
+
+def create_event(use_greenlets):
+    if use_greenlets:
+        return GeventEvent()
+    else:
+        return threading.Event()

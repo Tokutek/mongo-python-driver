@@ -1,4 +1,4 @@
-# Copyright 2012 10gen, Inc.
+# Copyright 2012-2014 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License",
 # you may not use this file except in compliance with the License.
@@ -87,10 +87,7 @@ def mongos_enum(enum):
 def select_primary(members):
     for member in members:
         if member.is_primary:
-            if member.up:
-                return member
-            else:
-                return None
+            return member
 
     return None
 
@@ -99,9 +96,6 @@ def select_member_with_tags(members, tags, secondary_only, latency):
     candidates = []
 
     for candidate in members:
-        if not candidate.up:
-            continue
-
         if secondary_only and candidate.is_primary:
             continue
 
@@ -191,7 +185,7 @@ def select_member(
 secondary_ok_commands = frozenset([
     "group", "aggregate", "collstats", "dbstats", "count", "distinct",
     "geonear", "geosearch", "geowalk", "mapreduce", "getnonce", "authenticate",
-    "text",
+    "text", "parallelcollectionscan"
 ])
 
 

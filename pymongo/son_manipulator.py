@@ -1,4 +1,4 @@
-# Copyright 2009-2012 10gen, Inc.
+# Copyright 2009-2014 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -64,6 +64,10 @@ class SONManipulator(object):
 
 class ObjectIdInjector(SONManipulator):
     """A son manipulator that adds the _id field if it is missing.
+
+    .. versionchanged:: 2.7
+       ObjectIdInjector is no longer used by PyMongo, but remains in this
+       module for backwards compatibility.
     """
 
     def transform_incoming(self, son, collection):

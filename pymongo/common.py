@@ -1,4 +1,4 @@
-# Copyright 2011-2012 10gen, Inc.
+# Copyright 2011-2014 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you
 # may not use this file except in compliance with the License.  You
@@ -21,6 +21,8 @@ from pymongo import read_preferences
 from pymongo.auth import MECHANISMS
 from pymongo.read_preferences import ReadPreference
 from pymongo.errors import ConfigurationError
+from bson.binary import (OLD_UUID_SUBTYPE, UUID_SUBTYPE,
+                         JAVA_LEGACY, CSHARP_LEGACY)
 
 HAS_SSL = True
 try:
@@ -34,9 +36,38 @@ if sys.platform.startswith('java'):
     HAS_SSL = False
 
 
+# Defaults until we connect to a server and get updated limits.
+MAX_BSON_SIZE = 16 * (1024 ** 2)
+MAX_MESSAGE_SIZE = 2 * MAX_BSON_SIZE
+MIN_WIRE_VERSION = 0
+MAX_WIRE_VERSION = 0
+MAX_WRITE_BATCH_SIZE = 1000
+
+# What this version of PyMongo supports.
+MIN_SUPPORTED_WIRE_VERSION = 0
+MAX_SUPPORTED_WIRE_VERSION = 2
+
+# mongod/s 2.6 and above return code 59 when a
+# command doesn't exist. mongod versions previous
+# to 2.6 and mongos 2.4.x return no error code
+# when a command does exist. mongos versions previous
+# to 2.4.0 return code 13390 when a command does not
+# exist.
+COMMAND_NOT_FOUND_CODES = (59, 13390, None)
+
+
 def raise_config_error(key, dummy):
     """Raise ConfigurationError with the given key name."""
     raise ConfigurationError("Unknown option %s" % (key,))
+
+
+# Mapping of URI uuid representation options to valid subtypes.
+_UUID_SUBTYPES = {
+    'standard': UUID_SUBTYPE,
+    'pythonLegacy': OLD_UUID_SUBTYPE,
+    'javaLegacy': JAVA_LEGACY,
+    'csharpLegacy': CSHARP_LEGACY
+}
 
 
 def validate_boolean(option, value):
@@ -180,7 +211,7 @@ def validate_tag_sets(dummy, value):
 
     if not isinstance(value, list):
         raise ConfigurationError((
-            "Tag sets %s invalid, must be a list" ) % repr(value))
+            "Tag sets %s invalid, must be a list") % repr(value))
     if len(value) == 0:
         raise ConfigurationError((
             "Tag sets %s invalid, must be None or contain at least one set of"
@@ -197,14 +228,36 @@ def validate_tag_sets(dummy, value):
 def validate_auth_mechanism(option, value):
     """Validate the authMechanism URI option.
     """
-    if value not in MECHANISMS:
+    # CRAM-MD5 is for server testing only. Undocumented,
+    # unsupported, may be removed at any time. You have
+    # been warned.
+    if value not in MECHANISMS and value != 'CRAM-MD5':
         raise ConfigurationError("%s must be in "
                                  "%s" % (option, MECHANISMS))
     return value
 
 
+def validate_uuid_representation(dummy, value):
+    """Validate the uuid representation option selected in the URI.
+    """
+    if value not in _UUID_SUBTYPES.keys():
+        raise ConfigurationError("%s is an invalid UUID representation. "
+                                 "Must be one of "
+                                 "%s" % (value, _UUID_SUBTYPES.keys()))
+    return _UUID_SUBTYPES[value]
+
+
+def validate_uuid_subtype(dummy, value):
+    """Validate the uuid subtype option, a numerical value whose acceptable
+    values are defined in bson.binary."""
+    if value not in _UUID_SUBTYPES.values():
+        raise ConfigurationError("Not a valid setting for uuid_subtype.")
+    return value
+
+
 # jounal is an alias for j,
-# wtimeoutms is an alias for wtimeout
+# wtimeoutms is an alias for wtimeout,
+# readpreferencetags is an alias for tag_sets.
 VALIDATORS = {
     'replicaset': validate_basestring,
     'slaveok': validate_boolean,
@@ -227,6 +280,7 @@ VALIDATORS = {
     'ssl_ca_certs': validate_readable,
     'readpreference': validate_read_preference,
     'read_preference': validate_read_preference,
+    'readpreferencetags': validate_tag_sets,
     'tag_sets': validate_tag_sets,
     'secondaryacceptablelatencyms': validate_positive_float,
     'secondary_acceptable_latency_ms': validate_positive_float,
@@ -235,6 +289,7 @@ VALIDATORS = {
     'authmechanism': validate_auth_mechanism,
     'authsource': validate_basestring,
     'gssapiservicename': validate_basestring,
+    'uuidrepresentation': validate_uuid_representation,
 }
 
 
@@ -290,7 +345,7 @@ class BaseObject(object):
     """A base class that provides attributes and methods common
     to multiple pymongo classes.
 
-    SHOULD NOT BE USED BY DEVELOPERS EXTERNAL TO 10GEN
+    SHOULD NOT BE USED BY DEVELOPERS EXTERNAL TO MONGODB.
     """
 
     def __init__(self, **options):
@@ -300,11 +355,11 @@ class BaseObject(object):
         self.__tag_sets = [{}]
         self.__secondary_acceptable_latency_ms = 15
         self.__safe = None
+        self.__uuid_subtype = OLD_UUID_SUBTYPE
         self.__write_concern = WriteConcern()
         self.__set_options(options)
         if (self.__read_pref == ReadPreference.PRIMARY
-            and self.__tag_sets != [{}]
-        ):
+                and self.__tag_sets != [{}]):
             raise ConfigurationError(
                 "ReadPreference PRIMARY cannot be combined with tags")
 
@@ -313,13 +368,15 @@ class BaseObject(object):
             if options.get("w") == 0:
                 self.__safe = False
             else:
-                self.__safe = validate_boolean('safe', options.get("safe", True))
+                self.__safe = validate_boolean('safe',
+                                               options.get("safe", True))
         # Note: 'safe' is always passed by Connection and ReplicaSetConnection
         # Always do the most "safe" thing, but warn about conflicts.
         if self.__safe and options.get('w') == 0:
-            warnings.warn("Conflicting write concerns.  'w' set to 0 "
-                          "but other options have enabled write concern. "
-                          "Please set 'w' to a value other than 0.",
+
+            warnings.warn("Conflicting write concerns: %s. Write concern "
+                          "options were configured, but w=0 disables all "
+                          "other options." % self.write_concern,
                           UserWarning)
 
     def __set_safe_option(self, option, value):
@@ -340,8 +397,10 @@ class BaseObject(object):
                 self.__slave_okay = validate_boolean(option, value)
             elif option in ('read_preference', "readpreference"):
                 self.__read_pref = validate_read_preference(option, value)
-            elif option == 'tag_sets':
+            elif option in ('tag_sets', 'readpreferencetags'):
                 self.__tag_sets = validate_tag_sets(option, value)
+            elif option == 'uuidrepresentation':
+                self.__uuid_subtype = validate_uuid_subtype(option, value)
             elif option in (
                 'secondaryacceptablelatencyms',
                 'secondary_acceptable_latency_ms'
@@ -386,10 +445,16 @@ class BaseObject(object):
           to complete. If replication does not complete in the given
           timeframe, a timeout exception is raised.
         - `j`: If ``True`` block until write operations have been committed
-          to the journal. Ignored if the server is running without journaling.
-        - `fsync`: If ``True`` force the database to fsync all files before
-          returning. When used with `j` the server awaits the next group
-          commit before returning.
+          to the journal. Cannot be used in combination with `fsync`. Prior
+          to MongoDB 2.6 this option was ignored if the server was running
+          without journaling. Starting with MongoDB 2.6 write operations will
+          fail with an exception if this option is used when the server is
+          running without journaling.
+        - `fsync`: If ``True`` and the server is running without journaling,
+          blocks until the server has synced all data files to disk. If the
+          server is running with journaling, this acts the same as the `j`
+          option, blocking until write operations have been committed to the
+          journal. Cannot be used in combination with `j`.
 
         >>> m = pymongo.MongoClient()
         >>> m.write_concern
@@ -446,7 +511,8 @@ class BaseObject(object):
     def __get_read_pref(self):
         """The read preference mode for this instance.
 
-        See :class:`~pymongo.read_preferences.ReadPreference` for available options.
+        See :class:`~pymongo.read_preferences.ReadPreference` for
+        available options.
 
         .. versionadded:: 2.1
         """
@@ -467,9 +533,9 @@ class BaseObject(object):
 
         .. versionadded:: 2.3
 
-        .. note:: ``secondary_acceptable_latency_ms`` is ignored when talking to a
-          replica set *through* a mongos. The equivalent is the localThreshold_ command
-          line option.
+        .. note:: ``secondary_acceptable_latency_ms`` is ignored when talking
+          to a replica set *through* a mongos. The equivalent is the
+          localThreshold_ command line option.
 
         .. _localThreshold: http://docs.mongodb.org/manual/reference/mongos/#cmdoption-mongos--localThreshold
         """
@@ -504,6 +570,21 @@ class BaseObject(object):
         self.__tag_sets = validate_tag_sets('tag_sets', value)
 
     tag_sets = property(__get_tag_sets, __set_tag_sets)
+
+    def __get_uuid_subtype(self):
+        """This attribute specifies which BSON Binary subtype is used when
+        storing UUIDs. Historically UUIDs have been stored as BSON Binary
+        subtype 3. This attribute is used to switch to the newer BSON Binary
+        subtype 4. It can also be used to force legacy byte order and subtype
+        compatibility with the Java and C# drivers. See the :mod:`bson.binary`
+        module for all options."""
+        return self.__uuid_subtype
+
+    def __set_uuid_subtype(self, value):
+        """Sets the BSON Binary subtype to be used when storing UUIDs."""
+        self.__uuid_subtype = validate_uuid_subtype("uuid_subtype", value)
+
+    uuid_subtype = property(__get_uuid_subtype, __set_uuid_subtype)
 
     def __get_safe(self):
         """**DEPRECATED:** Use the 'w' :attr:`write_concern` option instead.

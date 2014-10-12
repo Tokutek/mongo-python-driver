@@ -1,4 +1,4 @@
-# Copyright 2012 10gen, Inc.
+# Copyright 2012-2014 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -30,7 +30,7 @@ if thread_util.have_gevent:
     import gevent.greenlet  # Gevent's enhanced Greenlets.
     import gevent.hub
 
-from test.utils import looplet, RendezvousThread
+from test.utils import looplet, my_partial, RendezvousThread
 
 
 class TestIdent(unittest.TestCase):
@@ -54,6 +54,9 @@ class TestIdent(unittest.TestCase):
       child's callback was not
     """
     def _test_ident(self, use_greenlets):
+        if 'java' in sys.platform:
+            raise SkipTest("Can't rely on weakref callbacks in Jython")
+
         ident = thread_util.create_ident(use_greenlets)
 
         ids = set([ident.get()])
@@ -190,16 +193,6 @@ class TestGreenletIdent(unittest.TestCase):
 
         # unwatch() canceled the callback.
         self.assertFalse(callback_ran[0])
-
-
-# No functools in Python 2.4
-def my_partial(f, *args, **kwargs):
-    def _f(*new_args, **new_kwargs):
-        final_kwargs = kwargs.copy()
-        final_kwargs.update(new_kwargs)
-        return f(*(args + new_args), **final_kwargs)
-
-    return _f
 
 
 class TestCounter(unittest.TestCase):

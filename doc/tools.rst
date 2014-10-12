@@ -75,9 +75,16 @@ Minimongo
 
 Manga
   `Manga <http://pypi.python.org/pypi/manga>`_ aims to be a simpler ORM-like
-  layer on top of PyMongo. The syntax for defining schema is inspired be the
+  layer on top of PyMongo. The syntax for defining schema is inspired by the
   Django ORM, but Pymongo's query language is maintained. The source `is on
   github <http://github.com/wladston/manga>`_.
+  
+MotorEngine
+  `MotorEngine <http://motorengine.readthedocs.org/>`_ is a port of
+  MongoEngine to Motor, for asynchronous access with Tornado.
+  It implements the same modeling APIs to be data-portable, meaning that a
+  model defined in MongoEngine can be read in MotorEngine. The source is
+  `available on github <http://github.com/heynemann/motorengine>`_.
 
 Framework Tools
 ---------------

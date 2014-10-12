@@ -96,13 +96,13 @@ To use MongoDB with `Tornado <http://www.tornadoweb.org/>`_ see the
 
 For `Twisted <http://twistedmatrix.com/>`_, see `TxMongo
 <http://github.com/fiorix/mongo-async-python-driver>`_. Compared to PyMongo,
-TxMongo is less stable, lack features, and is less actively maintained.
+TxMongo is less stable, lacks features, and is less actively maintained.
 
-What does *OperationFailure* cursor id not valid at server mean?
-----------------------------------------------------------------
+What does *CursorNotFound* cursor id not valid at server mean?
+--------------------------------------------------------------
 Cursors in MongoDB can timeout on the server if they've been open for
 a long time without any operations being performed on them. This can
-lead to an :class:`~pymongo.errors.OperationFailure` exception being
+lead to an :class:`~pymongo.errors.CursorNotFound` exception being
 raised when attempting to iterate the cursor.
 
 How do I change the timeout value for cursors?
@@ -243,14 +243,6 @@ without using a Django backend. Certain features of Django that require
 using just MongoDB, but most of what Django provides can still be
 used.
 
-We have written a demo `Django + MongoDB project
-<http://github.com/mdirolf/DjanMon/tree/master>`_. The README for that
-project describes some of what you need to do to use MongoDB from
-Django. The main point is that your persistence code will go directly
-into your views, rather than being defined in separate models. The
-README also gives instructions for how to change settings.py to
-disable the features that won't work with MongoDB.
-
 One project which should make working with MongoDB and Django easier
 is `mango <http://github.com/vpulim/mango>`_. Mango is a set of
 MongoDB backends for Django sessions and authentication (bypassing
@@ -260,30 +252,7 @@ MongoDB backends for Django sessions and authentication (bypassing
 
 Does PyMongo work with **mod_wsgi**?
 ------------------------------------
-`mod_wsgi <http://code.google.com/p/modwsgi/>`_ is a popular Apache
-module used for hosting Python applications conforming to the `wsgi
-<http://www.wsgi.org/>`_ specification. There is a potential issue
-when deploying PyMongo applications with mod_wsgi involving PyMongo's
-C extension and mod_wsgi's multiple sub interpreters.
-
-One tricky issue that we've seen when deploying PyMongo applications
-with mod_wsgi is documented `here
-<http://code.google.com/p/modwsgi/wiki/ApplicationIssues>`_, in the
-**Multiple Python Sub Interpreters** section. When running PyMongo
-with the C extension enabled it is possible to see strange failures
-when encoding due to the way mod_wsgi handles module reloading with
-multiple sub interpreters. There are several possible ways to work
-around this issue:
-
-1. Run mod_wsgi in daemon mode with each WSGI application assigned to its
-   own daemon process.
-
-2. Force all WSGI applications to run in the same application group.
-
-3. Install PyMongo :ref:`without the C extension <install-no-c>` (this will
-   carry a performance penalty, but is the most immediate solution to this
-   problem).
-
+Yes. See the configuration guide for :ref:`pymongo-and-mod_wsgi`.
 
 How can I use something like Python's :mod:`json` module to encode my documents to JSON?
 ----------------------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-# Copyright 2010-2012 10gen, Inc.
+# Copyright 2010-2014 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 """
 
 import os
+import warnings
 
 import pymongo
 from pymongo.errors import ConnectionFailure
@@ -32,6 +33,12 @@ port2 = int(os.environ.get("DB_PORT2", 27018))
 
 host3 = unicode(os.environ.get("DB_IP3", 'localhost'))
 port3 = int(os.environ.get("DB_PORT3", 27019))
+
+# Make sure warnings are always raised, regardless of
+# python version.
+def setup():
+    warnings.resetwarnings()
+    warnings.simplefilter("always")
 
 
 def teardown():

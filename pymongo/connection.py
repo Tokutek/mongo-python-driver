@@ -1,4 +1,4 @@
-# Copyright 2009-2012 10gen, Inc.
+# Copyright 2009-2014 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you
 # may not use this file except in compliance with the License.  You
@@ -100,9 +100,18 @@ class Connection(MongoClient):
           | **Other optional parameters can be passed as keyword arguments:**
 
           - `socketTimeoutMS`: (integer) How long (in milliseconds) a send or
-            receive on a socket can take before timing out.
+            receive on a socket can take before timing out. Defaults to ``None``
+            (no timeout).
           - `connectTimeoutMS`: (integer) How long (in milliseconds) a
-            connection can take to be opened before timing out.
+            connection can take to be opened before timing out. Defaults to
+            ``20000``.
+          - `waitQueueTimeoutMS`: (integer) How long (in milliseconds) a
+            thread will wait for a socket from the pool if the pool has no
+            free sockets. Defaults to ``None`` (no timeout).
+          - `waitQueueMultiple`: (integer) Multiplied by max_pool_size to give
+            the number of threads allowed to wait for a socket at one time.
+            Defaults to ``None`` (no waiters).
+
           - `auto_start_request`: If ``True`` (the default), each thread that
             accesses this Connection has a socket allocated to it for the
             thread's lifetime.  This ensures consistent reads, even if you read
@@ -125,11 +134,16 @@ class Connection(MongoClient):
             to complete. If replication does not complete in the given
             timeframe, a timeout exception is raised. Implies safe=True.
           - `j`: If ``True`` block until write operations have been committed
-            to the journal. Ignored if the server is running without journaling.
-            Implies safe=True.
-          - `fsync`: If ``True`` force the database to fsync all files before
-            returning. When used with `j` the server awaits the next group
-            commit before returning. Implies safe=True.
+            to the journal. Cannot be used in combination with `fsync`. Prior
+            to MongoDB 2.6 this option was ignored if the server was running
+            without journaling. Starting with MongoDB 2.6 write operations will
+            fail with an exception if this option is used when the server is
+            running without journaling. Implies safe=True.
+          - `fsync`: If ``True`` and the server is running without journaling,
+            blocks until the server has synced all data files to disk. If the
+            server is running with journaling, this acts the same as the `j`
+            option, blocking until write operations have been committed to the
+            journal. Cannot be used in combination with `j`. Implies safe=True.
 
           | **Replica-set keyword arguments for connecting with a replica-set
             - either directly or via a mongos:**
