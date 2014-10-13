@@ -1111,7 +1111,12 @@ class TestBulkNoResults(BulkTestBase):
         batch.insert({'_id': 1})
         batch.find({'_id': 1}).remove_one()
         self.assertTrue(batch.execute({'w': 0}) is None)
-        self.assertEqual(3, self.coll.count())
+        # The insert batch [{_id: 2}, {_id: 1}] fails due to a unique
+        # check violation on {_id: 1}, which makes the {_id: 2} insert
+        # fail as well.  Therefore TokuMX has 2 (_ids 1 and 3), not 3
+        # documents.
+        #self.assertEqual(3, self.coll.count())
+        self.assertEqual(2, self.coll.count())
 
     def test_no_results_unordered_success(self):
 
@@ -1132,7 +1137,11 @@ class TestBulkNoResults(BulkTestBase):
         batch.insert({'_id': 1})
         batch.find({'_id': 1}).remove_one()
         self.assertTrue(batch.execute({'w': 0}) is None)
-        self.assertEqual(2, self.coll.count())
+        # The insert batch fails due to a unique check violation on {_id:
+        # 1}, which makes the {_id: 2} insert fail as well.  Therefore
+        # TokuMX has 1 (_id 3), not 2 documents.
+        #self.assertEqual(2, self.coll.count())
+        self.assertEqual(1, self.coll.count())
         self.assertTrue(self.coll.find_one({'_id': 1}) is None)
 
 
